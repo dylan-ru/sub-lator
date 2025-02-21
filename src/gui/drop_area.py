@@ -1,6 +1,9 @@
-from PyQt6.QtWidgets import QLabel, QFileDialog
+from PyQt6.QtWidgets import QLabel, QFileDialog, QMessageBox
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QIcon
+import os
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
+import os
 
 class DropArea(QLabel):
     filesDropped = pyqtSignal(list)
@@ -36,7 +39,19 @@ class DropArea(QLabel):
             event.ignore()
 
     def dropEvent(self, event: QDropEvent):
-        files = [url.toLocalFile() for url in event.mimeData().urls()
-                if url.toLocalFile().lower().endswith('.srt')]
+        files = []
+        for url in event.mimeData().urls():
+            local_file = url.toLocalFile()
+            if local_file.lower().endswith('.srt'):
+                files.append(local_file)  # Add individual .srt files
+            elif os.path.isdir(local_file):  # Check if it's a directory
+                # List all .srt files in the directory
+                srt_files = [os.path.join(local_file, f) for f in os.listdir(local_file) if f.endswith('.srt')]
+                files.extend(srt_files)  # Add found .srt files to the list
+                
+                # Check if no .srt files were found
+                if not srt_files:
+                    QMessageBox.warning(self, "Warning", "No .srt files found in the dropped folder.")
+
         if files:
             self.filesDropped.emit(files)

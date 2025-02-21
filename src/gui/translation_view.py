@@ -1,12 +1,14 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                             QTextEdit, QComboBox, QLabel, QLineEdit, QListWidget,
                             QMessageBox, QProgressBar, QCheckBox, QFileDialog)
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMetaObject, Q_ARG
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMetaObject, Q_ARG, QSize
 import os
 from typing import List, Dict, Optional, Tuple
 from ..core.translation_service import OpenRouterTranslationService
 from .drop_area import DropArea
 from ..core.async_utils import run_async, AsyncWorker
+from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import QStyle
 
 LANGUAGE_CODES = {
     "English": "EN",
@@ -73,6 +75,16 @@ class TranslationView(QWidget):
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
+
+        # Open source button
+        open_source_btn = QPushButton("Open Source")
+        folder_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)  # Get folder icon
+        open_source_btn.setIcon(folder_icon)  # Set the folder icon
+        open_source_btn.setIconSize(QSize(16, 16))  # Set icon size
+        open_source_btn.setStyleSheet("text-align: left;")  # Align text to the left
+        open_source_btn.clicked.connect(self._open_source_folder)
+        open_source_btn.setFixedSize(open_source_btn.sizeHint())  # Set size to match text
+        layout.addWidget(open_source_btn)  # Add above the drop area
 
         # Drop area
         self.drop_area = DropArea()
@@ -190,9 +202,17 @@ class TranslationView(QWidget):
         self._update_output_label()
 
     def _handle_dropped_files(self, files: List[str]):
-        """Handle dropped files."""
-        self.files.extend([f for f in files if f.endswith('.srt')])
-        self._update_file_list()
+        """Handle dropped files or folders."""
+        print("Dropped files/folders:", files)  # Debugging output
+        for file in files:
+            if os.path.isdir(file):  # Check if the dropped item is a directory
+                # List all .srt files in the directory
+                srt_files = [os.path.join(file, f) for f in os.listdir(file) if f.endswith('.srt')]
+                print("Found .srt files:", srt_files)  # Debugging output
+                self.files.extend(srt_files)  # Add found .srt files to the list
+            elif file.endswith('.srt'):
+                self.files.append(file)  # Add individual .srt files
+        self._update_file_list()  # Update the displayed file list
 
     def _update_file_list(self):
         """Update the list of files to be translated."""
@@ -413,3 +433,15 @@ class TranslationView(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             self.files.clear()
             self._update_file_list()
+
+    def _open_source_folder(self):
+        """Open the source folder and find srt files."""
+        folder_path = QFileDialog.getExistingDirectory(self, "Select Source Folder")
+        if folder_path:
+            # Analyze the folder for srt files
+            srt_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith('.srt')]
+            if srt_files:
+                self.files.extend(srt_files)
+                self._update_file_list()
+            else:
+                QMessageBox.warning(self, "Warning", "No .srt files found in the selected folder.")
