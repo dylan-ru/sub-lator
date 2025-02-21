@@ -68,7 +68,7 @@ class OpenRouterTranslationService(TranslationService):
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a translation assistant. Translate the following text to English, maintaining the original meaning and style. Do not add any additional information or commentary. Respect the timestamps, do not change them. Only translate the text."
+                    "content": "You are a translation assistant. Translate the following text to English, maintaining the original meaning and style. Do not add any additional information or commentary. Translatethe text to the specified language."
                 },
                 {
                     "role": "user",
