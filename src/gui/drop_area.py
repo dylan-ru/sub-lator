@@ -12,15 +12,35 @@ class DropArea(QLabel):
         super().__init__()
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setText("\nDrag and drop SRT files here\nor click to select files")
-        self.setStyleSheet("""
-            QLabel {
-                border: 2px dashed #aaa;
-                border-radius: 5px;
-                padding: 20px;
-                background: #f8f9fa;
-            }
-        """)
+        self.dark_mode = False
+        self._update_style()
         self.setAcceptDrops(True)
+
+    def _update_style(self):
+        if self.dark_mode:
+            self.setStyleSheet("""
+                QLabel {
+                    border: 2px dashed #666;
+                    border-radius: 5px;
+                    padding: 20px;
+                    background: #2a2a2a;
+                    color: #ffffff;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QLabel {
+                    border: 2px dashed #aaa;
+                    border-radius: 5px;
+                    padding: 20px;
+                    background: #f8f9fa;
+                    color: #000000;
+                }
+            """)
+
+    def set_dark_mode(self, enabled: bool):
+        self.dark_mode = enabled
+        self._update_style()
 
     def mousePressEvent(self, event):
         files, _ = QFileDialog.getOpenFileNames(

@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                             QTextEdit, QComboBox, QLabel, QLineEdit, QListWidget,
-                            QMessageBox, QProgressBar, QCheckBox, QFileDialog)
+                            QMessageBox, QProgressBar, QCheckBox, QFileDialog, QApplication)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMetaObject, Q_ARG, QSize
 import os
 from typing import List, Dict, Optional, Tuple
@@ -9,6 +9,8 @@ from .drop_area import DropArea
 from ..core.async_utils import run_async, AsyncWorker
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QStyle
+
+state = False
 
 LANGUAGE_CODES = {
     "English": "EN",
@@ -44,7 +46,44 @@ class TranslationView(QWidget):
         self.update_progress.connect(self._update_progress_bar)
         self.update_status.connect(self._update_status_label)
         
+        # Set default button style
+        self.setStyleSheet("""
+            QPushButton { 
+                border-radius: 5px;
+                padding: 5px;
+                border: 1px solid #ccc;
+            }
+            QPushButton:hover {
+                background-color: rgb(140, 140, 140);
+            }
+            QComboBox {
+                border-radius: 5px;
+                padding: 8px 25px 8px 8px;
+                border: 1px solid #ccc;
+                min-width: 6em;
+            }
+            QComboBox:hover {
+                background-color: rgb(102, 102, 102);
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+                border-radius: 5px;
+            }
+            QComboBox::down-arrow {
+                image: url(src/icons/down_arrow_dark.svg);
+                width: 12px;
+                height: 12px;
+            }
+            QComboBox QAbstractItemView {
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                selection-background-color: #e0e0e0;
+            }
+        """)
+        
         self._init_ui()
+        self.dark_mode_active = False
 
     def closeEvent(self, event):
         """Handle cleanup when the widget is closed."""
@@ -77,14 +116,32 @@ class TranslationView(QWidget):
         layout = QVBoxLayout(self)
 
         # Open source button
-        open_source_btn = QPushButton("Open Source")
+        self.open_source_btn = QPushButton("Open Source")
         folder_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)  # Get folder icon
-        open_source_btn.setIcon(folder_icon)  # Set the folder icon
-        open_source_btn.setIconSize(QSize(16, 16))  # Set icon size
-        open_source_btn.setStyleSheet("text-align: left;")  # Align text to the left
-        open_source_btn.clicked.connect(self._open_source_folder)
-        open_source_btn.setFixedSize(open_source_btn.sizeHint())  # Set size to match text
-        layout.addWidget(open_source_btn)  # Add above the drop area
+        self.open_source_btn.setIcon(folder_icon)  # Set the folder icon
+        self.open_source_btn.setIconSize(QSize(16, 16))  # Set icon size
+        self.open_source_btn.setStyleSheet("text-align: left;")  # Align text to the left
+        self.open_source_btn.clicked.connect(self._open_source_folder)
+        self.open_source_btn.setFixedSize(self.open_source_btn.sizeHint() + QSize(7, 0))  # Set size to match text
+        self.default_open_source_btn_size = self.open_source_btn.size()  # Store default size
+        layout.addWidget(self.open_source_btn)  # Add above the drop area
+
+        # Dark mode button
+        self.dark_mode_btn = QPushButton("Dark Mode: OFF")  # Store as instance variable
+        self.moon_icon = QIcon(os.path.join('src/icons', 'moon_icon.png'))
+        self.white_moon_icon = QIcon(os.path.join('src/icons', 'white_moon.png'))
+        self.dark_mode_btn.setIcon(self.moon_icon)
+        self.dark_mode_btn.setIconSize(QSize(16, 16))
+        self.dark_mode_btn.setStyleSheet("text-align: left;")
+        self.dark_mode_btn.clicked.connect(self.toggle_dark_mode)
+        self.dark_mode_btn.setFixedSize(self.dark_mode_btn.sizeHint() + QSize(7, 0))  
+        layout.addWidget(self.dark_mode_btn)
+
+        # File management buttons
+        file_buttons_layout = QHBoxLayout()
+        file_buttons_layout.addWidget(self.open_source_btn, alignment=Qt.AlignmentFlag.AlignLeft)  # Add open source button to the left
+        file_buttons_layout.addWidget(self.dark_mode_btn, alignment=Qt.AlignmentFlag.AlignRight)  # Add dark mode button to the right
+        layout.addLayout(file_buttons_layout)  # Add the button layout to the main layout
 
         # Drop area
         self.drop_area = DropArea()
@@ -104,13 +161,15 @@ class TranslationView(QWidget):
         
         # Remove selected file button
         remove_file_btn = QPushButton("Remove Selected")
+        remove_file_btn.setFixedWidth(remove_file_btn.sizeHint().width() + 6)  # Add 6 pixels (3 on each side)
         remove_file_btn.clicked.connect(self._remove_selected_file)
-        file_buttons_layout.addWidget(remove_file_btn)
+        file_buttons_layout.addWidget(remove_file_btn, alignment=Qt.AlignmentFlag.AlignCenter)
         
         # Clear all files button
         clear_files_btn = QPushButton("Clear All")
+        clear_files_btn.setFixedWidth(clear_files_btn.sizeHint().width() + 6)  # Add 6 pixels (3 on each side)
         clear_files_btn.clicked.connect(self._clear_files)
-        file_buttons_layout.addWidget(clear_files_btn)
+        file_buttons_layout.addWidget(clear_files_btn, alignment=Qt.AlignmentFlag.AlignCenter)
         
         file_section.addLayout(file_buttons_layout)
         layout.addLayout(file_section)
@@ -139,8 +198,9 @@ class TranslationView(QWidget):
 
         # Remove key button
         remove_key_btn = QPushButton("Remove Selected Key")
+        remove_key_btn.setFixedWidth(remove_key_btn.sizeHint().width() + 6)  # Add 6 pixels (3 on each side)
         remove_key_btn.clicked.connect(self._remove_selected_key)
-        api_key_section.addWidget(remove_key_btn)
+        api_key_section.addWidget(remove_key_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
         layout.addLayout(api_key_section)
 
@@ -170,8 +230,9 @@ class TranslationView(QWidget):
 
         # Output directory button
         self.select_dir_btn = QPushButton("Select Output Directory")
+        self.select_dir_btn.setFixedWidth(self.select_dir_btn.sizeHint().width() + 6)  # Add 6 pixels (3 on each side)
         self.select_dir_btn.clicked.connect(self._select_output_directory)
-        layout.addWidget(self.select_dir_btn)
+        layout.addWidget(self.select_dir_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # Progress section
         progress_layout = QVBoxLayout()
@@ -183,8 +244,9 @@ class TranslationView(QWidget):
 
         # Translate button
         self.translate_btn = QPushButton("Translate Files")
+        self.translate_btn.setFixedWidth(self.translate_btn.sizeHint().width() + 6)  # Add 6 pixels (3 on each side)
         self.translate_btn.clicked.connect(self._translate_files)
-        layout.addWidget(self.translate_btn)
+        layout.addWidget(self.translate_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # Status label
         self.status_label = QLabel("")
@@ -240,6 +302,7 @@ class TranslationView(QWidget):
             self.select_dir_btn.setText("Output: Using original file locations")
         else:
             self.select_dir_btn.setText(f"Output: {self.output_dir or 'Current Directory'}")
+        self.select_dir_btn.setFixedWidth(self.select_dir_btn.sizeHint().width() + 6)  # Add 6 pixels (3 on each side)
 
     def _translate_files(self):
         """Start the translation process."""
@@ -445,3 +508,68 @@ class TranslationView(QWidget):
                 self._update_file_list()
             else:
                 QMessageBox.warning(self, "Warning", "No .srt files found in the selected folder.")
+
+    def toggle_dark_mode(self):
+        if not self.dark_mode_active:
+            dark_style = """
+            QWidget { background-color: #121212; color: #e0e0e0; }
+            QPushButton { 
+                background-color: #2d2d2d; 
+                color: #f0f0f0;
+                border: 1px solid #3d3d3d;
+                padding: 5px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: darkgray;
+            }
+            QLineEdit, QTextEdit, QPlainTextEdit, QListWidget, QLabel { 
+                background-color: #1e1e1e; 
+                color: #e0e0e0; 
+            }
+            QComboBox {
+                background-color: rgb(115, 115, 115);
+                color: #f0f0f0;
+                border: 1px solid #3d3d3d;
+                border-radius: 5px;
+                padding: 8px 25px 8px 8px;
+                min-width: 6em;
+            }
+            QComboBox:hover {
+                background-color: rgb(128, 159, 255);
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+                border-radius: 5px;
+                background-color: transparent;
+            }
+            QComboBox::down-arrow {
+                image: url(src/icons/down_arrow.svg);
+                width: 12px;
+                height: 12px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d2d2d;
+                color: #f0f0f0;
+                selection-background-color: #3d3d3d;
+                selection-color: #ffffff;
+                border: 1px solid #3d3d3d;
+                border-radius: 5px;
+            }
+            QMessageBox { background-color: #121212; color: #e0e0e0; }
+            """
+            QApplication.instance().setStyleSheet(dark_style)
+            self.dark_mode_active = True
+            
+            self.drop_area.set_dark_mode(True)
+            self.dark_mode_btn.setText("Dark Mode: ON")
+            self.dark_mode_btn.setIcon(self.white_moon_icon)
+            self.open_source_btn.setFixedSize(QSize(self.default_open_source_btn_size.width() + 5, self.default_open_source_btn_size.height() + 2))
+        else:
+            QApplication.instance().setStyleSheet("")
+            self.dark_mode_active = False
+            self.drop_area.set_dark_mode(False)
+            self.dark_mode_btn.setText("Dark Mode: OFF")
+            self.dark_mode_btn.setIcon(self.moon_icon)
+            self.open_source_btn.setFixedSize(QSize(self.default_open_source_btn_size.width() + 5, self.default_open_source_btn_size.height()))
