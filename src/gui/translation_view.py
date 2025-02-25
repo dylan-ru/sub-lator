@@ -5,6 +5,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMetaObject, Q_ARG, QSize
 import os
 from typing import List, Dict, Optional, Tuple
 from ..core.translation_service import OpenRouterTranslationService
+from ..core.key_importer import KeyImporter
 from .drop_area import DropArea
 from ..core.async_utils import run_async, AsyncWorker
 from PyQt6.QtGui import QIcon
@@ -177,8 +178,19 @@ class TranslationView(QWidget):
         # API Key section
         api_key_section = QVBoxLayout()
         
-        # API Key input
+        # API Key input layout with import button
         api_key_input_layout = QHBoxLayout()
+        
+        # Import key button
+        self.import_key_btn = QPushButton()
+        upload_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)
+        self.import_key_btn.setIcon(upload_icon)
+        self.import_key_btn.setToolTip("Import API Keys")
+        self.import_key_btn.clicked.connect(self._import_api_keys)
+        self.import_key_btn.setFixedSize(QSize(30, 30))
+        api_key_input_layout.addWidget(self.import_key_btn)
+        
+        # API Key input
         api_key_label = QLabel("API Key:")
         self.api_key_input = QLineEdit()
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
@@ -197,9 +209,9 @@ class TranslationView(QWidget):
         api_key_section.addWidget(self.api_keys_list)
 
         # Remove key button
-        remove_key_btn = QPushButton("Remove Selected Key")
+        remove_key_btn = QPushButton("Remove key")
         remove_key_btn.setFixedWidth(remove_key_btn.sizeHint().width() + 6)  # Add 6 pixels (3 on each side)
-        remove_key_btn.clicked.connect(self._remove_selected_key)
+        remove_key_btn.clicked.connect(self._remove_all_keys)
         api_key_section.addWidget(remove_key_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
         layout.addLayout(api_key_section)
@@ -416,41 +428,62 @@ class TranslationView(QWidget):
             QMessageBox.warning(self, "Warning", "Please enter an API key")
             return
 
+        # Check if there are any existing keys
+        existing_keys = self.translation_service.get_api_keys()
+        if existing_keys:
+            QMessageBox.warning(
+                self, 
+                "Warning", 
+                "Only one API key is allowed.\n Please remove the existing key first."
+            )
+            return
+
         self.translation_service.add_api_key(key)
         self.api_key_input.clear()
         self._update_key_list()
 
-    def _remove_selected_key(self):
-        current_item = self.api_keys_list.currentItem()
-        if not current_item:
-            QMessageBox.warning(self, "Warning", "Please select an API key to remove")
+    def _remove_all_keys(self):
+        """Remove all API keys."""
+        all_keys = self.translation_service.get_api_keys()
+        if not all_keys:
+            QMessageBox.warning(self, "Warning", "No API keys to remove")
             return
 
-        key = current_item.text().split(" [")[0]  # Extract key without status
-        self.translation_service.remove_api_key(key)
-        self._update_key_list()
+        reply = QMessageBox.question(
+            self,
+            "Confirm Remove",
+            "Are you sure you want to remove API key?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            for key in all_keys:
+                self.translation_service.remove_api_key(key)
+            self._update_key_list()
+            QMessageBox.information(self, "Success", "API key have been removed")
 
     def _update_key_list(self):
-        # Store the currently selected key
-        current_item = self.api_keys_list.currentItem()
-        selected_key = current_item.text().split(" [")[0] if current_item else None
-        
+        """Update the list of API keys, showing only one key."""
         self.api_keys_list.clear()
-        selected_index = -1
         
-        # Rebuild the list and find the index of the previously selected key
-        for i, key in enumerate(self.translation_service.get_api_keys()):
-            status = self.translation_service.get_key_status(key)
-            if status:
-                cooldown = status["cooldown_remaining"]
-                status_text = "Ready" if status["is_available"] else f"Cooldown: {cooldown:.1f}s"
-                self.api_keys_list.addItem(f"{key} [{status_text}]")
-                if key == selected_key:
-                    selected_index = i
-
-        # Restore the selection if the key still exists
-        if selected_index >= 0:
-            self.api_keys_list.setCurrentRow(selected_index)
+        # Get all keys
+        all_keys = self.translation_service.get_api_keys()
+        if not all_keys:
+            return
+            
+        # Only show the first key
+        key = all_keys[0]
+        # Mask the key to show only first 5 and last 3 characters with exactly 6 asterisks
+        masked_key = f"{key[:5]}{'*' * 6}{key[-3:]}"
+        status = self.translation_service.get_key_status(key)
+        if status:
+            cooldown = status["cooldown_remaining"]
+            status_text = "Ready" if status["is_available"] else f"Cooldown: {cooldown:.1f}s"
+            self.api_keys_list.addItem(f"{masked_key} [{status_text}]")
+            
+        # Set the first key as selected
+        self.api_keys_list.setCurrentRow(0)
 
     def _update_key_statuses(self):
         self._update_key_list()
@@ -573,3 +606,43 @@ class TranslationView(QWidget):
             self.dark_mode_btn.setText("Dark Mode: OFF")
             self.dark_mode_btn.setIcon(self.moon_icon)
             self.open_source_btn.setFixedSize(QSize(self.default_open_source_btn_size.width() + 5, self.default_open_source_btn_size.height()))
+
+    def _import_api_keys(self):
+        """Handle the import of API keys from a zip file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select API Keys File",
+            "",
+            "ZIP files (*.zip)"
+        )
+        
+        if not file_path:
+            return
+            
+        try:
+            # Create key importer with the predefined password
+            importer = KeyImporter("ZjcGbbwDjzDDkdL")
+            
+            # Import keys from the zip file
+            imported_keys = importer.import_keys_from_zip(file_path)
+            
+            # Add each imported key
+            for key in imported_keys:
+                self.translation_service.add_api_key(key)
+            
+            # Update the key list
+            self._update_key_list()
+            
+            # Show success message
+            QMessageBox.information(
+                self,
+                "Success",
+                f"Successfully imported API key"
+            )
+            
+        except ValueError as e:
+            QMessageBox.critical(
+                self,
+                "Import Error",
+                str(e)
+            )
