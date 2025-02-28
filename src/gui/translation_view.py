@@ -266,14 +266,16 @@ class TranslationView(QWidget):
     def _handle_dropped_files(self, files: List[str]):
         """Handle dropped files or folders."""
         print("Dropped files/folders:", files)  # Debugging output
+        subtitle_extensions = ('.srt', '.ass', '.ssa', '.txt', '.vtt')
         for file in files:
             if os.path.isdir(file):  # Check if the dropped item is a directory
-                # List all .srt files in the directory
-                srt_files = [os.path.join(file, f) for f in os.listdir(file) if f.endswith('.srt')]
-                print("Found .srt files:", srt_files)  # Debugging output
-                self.files.extend(srt_files)  # Add found .srt files to the list
-            elif file.endswith('.srt'):
-                self.files.append(file)  # Add individual .srt files
+                # List all subtitle files in the directory
+                subtitle_files = [os.path.join(file, f) for f in os.listdir(file) 
+                                if f.lower().endswith(subtitle_extensions)]
+                print("Found subtitle files:", subtitle_files)  # Debugging output
+                self.files.extend(subtitle_files)  # Add found subtitle files to the list
+            elif file.lower().endswith(subtitle_extensions):
+                self.files.append(file)  # Add individual subtitle files
         self._update_file_list()  # Update the displayed file list
 
     def _update_file_list(self):
@@ -338,7 +340,7 @@ class TranslationView(QWidget):
                 try:
                     # Read the input file
                     with open(input_file, 'r', encoding='utf-8') as f:
-                        content = f.read().strip()
+                        content = f.read()
 
                     # Create translation prompt
                     translation_prompt = (
@@ -360,9 +362,10 @@ class TranslationView(QWidget):
                     
                     # Save translated file
                     base_name = os.path.splitext(os.path.basename(input_file))[0]
+                    file_ext = os.path.splitext(input_file)[1]  # Get original file extension
                     output_dir = os.path.dirname(input_file) if self.store_at_original else (self.output_dir or ".")
                     lang_suffix = LANGUAGE_CODES.get(self.language_combo.currentText(), "XX")
-                    output_file = os.path.join(output_dir, f"{base_name}-{lang_suffix}.srt")
+                    output_file = os.path.join(output_dir, f"{base_name}-{lang_suffix}{file_ext}")
                     
                     with open(output_file, 'w', encoding='utf-8') as f:
                         f.write(translated)
