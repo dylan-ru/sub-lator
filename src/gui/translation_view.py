@@ -5,11 +5,13 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMetaObject, Q_ARG, QSize
 import os
 from typing import List, Dict, Optional, Tuple
 from ..core.translation_service import OpenRouterTranslationService
+from ..core.groq_translation_service import GroqTranslationService
 from ..core.key_importer import KeyImporter
 from .drop_area import DropArea
 from ..core.async_utils import run_async, AsyncWorker
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QStyle
+from ..core.api_provider import ApiProviderFactory
 
 state = False
 
@@ -31,10 +33,20 @@ class TranslationView(QWidget):
     update_progress = pyqtSignal(int)
     update_status = pyqtSignal(str)
     back_clicked = pyqtSignal()
+    switch_to_srt_generation = pyqtSignal()  # New signal for navigation
 
     def __init__(self):
         super().__init__()
-        self.translation_service = OpenRouterTranslationService()
+        self.current_provider = "OpenRouter"  # Default provider
+        self.translation_services = {
+            "OpenRouter": OpenRouterTranslationService(),
+            "Groq": GroqTranslationService()
+        }
+        self.translation_service = self.translation_services[self.current_provider]
+        
+        # Initialize each provider with keys from storage
+        self._initialize_provider_keys()
+        
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self._update_key_statuses)
         self.update_timer.start(1000)
@@ -84,6 +96,10 @@ class TranslationView(QWidget):
         """)
         
         self._init_ui()
+        
+        # Update the API key list immediately after UI initialization
+        self._update_key_list()
+        
         self.dark_mode_active = False
 
     def closeEvent(self, event):
@@ -115,6 +131,11 @@ class TranslationView(QWidget):
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
+
+        # Navigation button for SRT Generation
+        self.srt_generation_btn = QPushButton("Subtitles generation")
+        self.srt_generation_btn.clicked.connect(self.switch_to_srt_generation.emit)
+        layout.addWidget(self.srt_generation_btn)
 
         # Open source button
         self.open_source_btn = QPushButton("Open Source")
@@ -174,6 +195,17 @@ class TranslationView(QWidget):
         
         file_section.addLayout(file_buttons_layout)
         layout.addLayout(file_section)
+
+        # API Provider selection
+        provider_layout = QHBoxLayout()
+        provider_label = QLabel("API Provider:")
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItems(["OpenRouter", "Groq"])
+        self.provider_combo.setCurrentText(self.current_provider)
+        self.provider_combo.currentTextChanged.connect(self._change_provider)
+        provider_layout.addWidget(provider_label)
+        provider_layout.addWidget(self.provider_combo)
+        layout.addLayout(provider_layout)
 
         # API Key section
         api_key_section = QVBoxLayout()
@@ -264,6 +296,51 @@ class TranslationView(QWidget):
         self.status_label = QLabel("")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.status_label)
+
+    def _change_provider(self, provider_name: str):
+        """Handle changing the API provider."""
+        if provider_name in self.translation_services:
+            self.current_provider = provider_name
+            self.translation_service = self.translation_services[provider_name]
+            
+            # Reload the keys from storage to ensure we have the latest
+            if provider_name == "Groq":
+                from ..core.groq_key_storage import GroqKeyStorage
+                groq_storage = GroqKeyStorage()
+                # Get all keys from storage
+                stored_keys = groq_storage.get_keys()
+                
+                # Clear existing keys in the service
+                current_keys = self.translation_service.get_api_keys()
+                for key in current_keys:
+                    self.translation_service.remove_api_key(key)
+                
+                # Add all keys from storage to the service
+                for key in stored_keys:
+                    self.translation_service.add_api_key(key)
+            elif provider_name == "OpenRouter":
+                from ..core.key_storage import KeyStorage
+                openrouter_storage = KeyStorage()
+                # Get all keys from storage
+                stored_keys = openrouter_storage.load_keys()
+                
+                # Clear existing keys in the service
+                current_keys = self.translation_service.get_api_keys()
+                for key in current_keys:
+                    self.translation_service.remove_api_key(key)
+                
+                # Add all keys from storage to the service
+                for key in stored_keys:
+                    self.translation_service.add_api_key(key)
+            
+            # Update model list based on provider
+            self.model_combo.clear()
+            self.model_combo.addItems(self.translation_service.get_available_models())
+            
+            # Update key list
+            self._update_key_list()
+        else:
+            QMessageBox.warning(self, "Warning", f"Unknown provider: {provider_name}")
 
     def set_store_at_original(self, store: bool):
         """Set whether to store files at original location."""
@@ -438,6 +515,21 @@ class TranslationView(QWidget):
             )
             return
 
+        # Add the key to the appropriate storage based on the current provider
+        if self.current_provider == "Groq":
+            from ..core.groq_key_storage import GroqKeyStorage
+            groq_storage = GroqKeyStorage()
+            groq_storage.add_key(key)
+        elif self.current_provider == "OpenRouter":
+            from ..core.key_storage import KeyStorage
+            openrouter_storage = KeyStorage()
+            # Need to get existing keys, add the new one, then save
+            keys = openrouter_storage.load_keys()
+            if key not in keys:
+                keys.append(key)
+                openrouter_storage.save_keys(keys)
+            
+        # Also add key to the service
         self.translation_service.add_api_key(key)
         self.api_key_input.clear()
         self._update_key_list()
@@ -458,8 +550,20 @@ class TranslationView(QWidget):
         )
         
         if reply == QMessageBox.StandardButton.Yes:
+            # Remove keys from the underlying storage directly
+            if self.current_provider == "Groq":
+                from ..core.groq_key_storage import GroqKeyStorage
+                groq_storage = GroqKeyStorage()
+                groq_storage.remove_all_keys()
+            elif self.current_provider == "OpenRouter":
+                from ..core.key_storage import KeyStorage
+                openrouter_storage = KeyStorage()
+                openrouter_storage.save_keys([])  # Save empty list to clear keys
+            
+            # Also remove from the service
             for key in all_keys:
                 self.translation_service.remove_api_key(key)
+                
             self._update_key_list()
             QMessageBox.information(self, "Success", "API key have been removed")
 
@@ -474,19 +578,71 @@ class TranslationView(QWidget):
             
         # Only show the first key
         key = all_keys[0]
+        if not key or len(key) == 0:
+            return
+            
         # Mask the key to show only first 5 and last 3 characters with exactly 6 asterisks
-        masked_key = f"{key[:5]}{'*' * 6}{key[-3:]}"
+        if len(key) > 8:
+            masked_key = f"{key[:5]}{'*' * 6}{key[-3:]}"
+        else:
+            masked_key = "*" * len(key)
+            
         status = self.translation_service.get_key_status(key)
         if status:
             cooldown = status["cooldown_remaining"]
             status_text = "Ready" if status["is_available"] else f"Cooldown: {cooldown:.1f}s"
-            self.api_keys_list.addItem(f"{masked_key} [{status_text}]")
+            self.api_keys_list.addItem(f"{self.current_provider}: {masked_key} [{status_text}]")
+        else:
+            # If no status, just show the key without status
+            self.api_keys_list.addItem(f"{self.current_provider}: {masked_key}")
             
         # Set the first key as selected
-        self.api_keys_list.setCurrentRow(0)
+        if self.api_keys_list.count() > 0:
+            self.api_keys_list.setCurrentRow(0)
 
     def _update_key_statuses(self):
+        # Check if we need to reload keys from storage
+        self._refresh_api_keys_from_storage()
         self._update_key_list()
+        
+    def _refresh_api_keys_from_storage(self):
+        """Refresh API keys from storage to ensure we have the latest."""
+        # Reload keys from storage for the current provider
+        if self.current_provider == "Groq":
+            from ..core.groq_key_storage import GroqKeyStorage
+            groq_storage = GroqKeyStorage()
+            stored_keys = groq_storage.get_keys()
+            
+            # Get the current keys in the service
+            current_keys = self.translation_service.get_api_keys()
+            
+            # Check if keys are different
+            if set(stored_keys) != set(current_keys):
+                # Clear existing keys
+                for key in current_keys:
+                    self.translation_service.remove_api_key(key)
+                
+                # Add keys from storage
+                for key in stored_keys:
+                    self.translation_service.add_api_key(key)
+                    
+        elif self.current_provider == "OpenRouter":
+            from ..core.key_storage import KeyStorage
+            openrouter_storage = KeyStorage()
+            stored_keys = openrouter_storage.load_keys()
+            
+            # Get the current keys in the service
+            current_keys = self.translation_service.get_api_keys()
+            
+            # Check if keys are different
+            if set(stored_keys) != set(current_keys):
+                # Clear existing keys
+                for key in current_keys:
+                    self.translation_service.remove_api_key(key)
+                
+                # Add keys from storage
+                for key in stored_keys:
+                    self.translation_service.add_api_key(key)
 
     def _update_progress_bar(self, value: int):
         """Update progress bar from any thread."""
@@ -646,3 +802,33 @@ class TranslationView(QWidget):
                 "Import Error",
                 str(e)
             )
+
+    def _initialize_provider_keys(self):
+        """Initialize each provider with the correct keys from storage."""
+        # Load OpenRouter keys
+        from ..core.key_storage import KeyStorage
+        openrouter_storage = KeyStorage()
+        openrouter_keys = openrouter_storage.load_keys()
+        
+        # Clear existing keys
+        current_keys = self.translation_services["OpenRouter"].get_api_keys()
+        for key in current_keys:
+            self.translation_services["OpenRouter"].remove_api_key(key)
+            
+        # Add keys from storage
+        for key in openrouter_keys:
+            self.translation_services["OpenRouter"].add_api_key(key)
+            
+        # Load Groq keys
+        from ..core.groq_key_storage import GroqKeyStorage
+        groq_storage = GroqKeyStorage()
+        groq_keys = groq_storage.get_keys()
+        
+        # Clear existing keys
+        current_keys = self.translation_services["Groq"].get_api_keys()
+        for key in current_keys:
+            self.translation_services["Groq"].remove_api_key(key)
+            
+        # Add keys from storage
+        for key in groq_keys:
+            self.translation_services["Groq"].add_api_key(key)
