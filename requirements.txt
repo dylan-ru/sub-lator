@@ -1,5 +1,19 @@
-PyQt6>=6.4.0
-pyzipper>=1.1.0
-requests>=2.31.0
-aiohttp>=3.9.0
-python-dotenv>=1.0.0 
+PyQt6
+# PyQt6-QtMultimedia  # This package doesn't exist
+pyzipper
+requests
+urllib3
+requests-toolbelt
+aiohttp
+python-dotenv
+assemblyai
+PyQt6-WebEngine
+pydub
+pytube
+numpy
+scipy
+# Added for WhisperX integration
+whisperx
+torch
+transformers
+pyannote.audio

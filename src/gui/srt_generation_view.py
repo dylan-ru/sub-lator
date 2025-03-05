@@ -1,82 +1,154 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                          QListWidget, QMessageBox, QFileDialog, QLineEdit, QStyle, QComboBox,
-                         QProgressBar)
-from PyQt6.QtCore import pyqtSignal, Qt
+                         QProgressBar, QCheckBox)
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer  # type: ignore
 import os
-from typing import List
+from typing import List, Optional, Tuple, Dict, Any
 from .video_drop_area import VideoDropArea
-from PyQt6.QtGui import QIcon
-import assemblyai as aai
+from PyQt6.QtGui import QIcon  # type: ignore
+import assemblyai as aai  # type: ignore
 from ..core.async_utils import run_async
 from ..core.api_provider import ApiProviderFactory
+import re
+import subprocess
+import wave
+import struct
+import math
+from PyQt6.QtCore import QUrl, QCoreApplication  # type: ignore
+import time
+from ..core.subtitle_synchronizer import SubtitleSynchronizer  # Legacy synchronizer
+from ..core.whisper_synchronizer import WhisperSynchronizer  # New WhisperX-based synchronizer
+import asyncio
+
+# Conditionally import PyQt6.QtMultimedia - it might not be installed
+has_qt_multimedia = False
+try:
+    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput  # type: ignore
+    has_qt_multimedia = True
+except ImportError:
+    print("PyQt6.QtMultimedia not available. Some duration detection methods will be skipped.")
 
 class ApiKeyManager:
     def __init__(self):
         self.current_provider = "AssemblyAI"  # Default provider
         self.providers = {
-            "AssemblyAI": None,
-            "Groq": None
+            "AssemblyAI": None
         }
         self._initialize_providers()
         
     def _initialize_providers(self):
-        """Initialize API provider instances."""
-        from ..core.assembly_key_storage import AssemblyKeyStorage
-        from ..core.groq_key_storage import GroqKeyStorage
+        """Load API keys from their provider-specific storage."""
+        factory = ApiProviderFactory()
         
-        # Initialize provider storage
-        self.providers["AssemblyAI"] = AssemblyKeyStorage()
-        self.providers["Groq"] = GroqKeyStorage()
-    
-    def set_provider(self, provider_name: str):
-        """Change the current API provider."""
-        if provider_name in self.providers:
-            self.current_provider = provider_name
-        else:
-            raise ValueError(f"Unknown provider: {provider_name}")
-    
-    def get_current_provider(self) -> str:
-        """Get the name of the current provider."""
-        return self.current_provider
-    
-    def get_available_providers(self) -> List[str]:
-        """Get list of available providers."""
-        return list(self.providers.keys())
-
-    def set_api_key(self, key: str):
-        """Set API key for the current provider."""
+        # Initialize providers with their factory instances
+        for provider_name in self.providers.keys():
+            try:
+                provider = factory.get_provider(provider_name)
+                if provider:
+                    # Get the API key from the provider's storage
+                    key = provider.get_api_key()
+                    if key:
+                        self.providers[provider_name] = key
+                    else:
+                        print(f"No API key found for {provider_name}")
+            except Exception as e:
+                print(f"Error initializing provider {provider_name}: {str(e)}")
+        
+    def save_key(self, key):
+        """Save an API key for the current provider."""
         if not key:
-            self.providers[self.current_provider].remove_all_keys()
-        else:
-            # For now, we only support one key per provider
-            # First remove any existing keys
-            current_keys = self.get_keys()
-            if current_keys:
-                for existing_key in current_keys:
-                    self.providers[self.current_provider].remove_key(existing_key)
+            raise ValueError("API key cannot be empty")
             
-            # Add the new key
-            self.providers[self.current_provider].add_key(key)
-
-    def get_keys(self) -> List[str]:
-        """Get API keys for the current provider."""
-        return self.providers[self.current_provider].get_keys()
-
-    def is_api_key_set(self) -> bool:
-        """Check if API key is set for the current provider."""
-        return bool(self.get_keys())
+        try:
+            # Get the provider to save the key
+            factory = ApiProviderFactory()
+            provider = factory.get_provider(self.current_provider)
+            
+            if provider:
+                # Save the key using the provider's method
+                provider.set_api_key(key)
+                # Update our local cache
+                self.providers[self.current_provider] = key
+                print(f"API key saved for {self.current_provider}")
+            else:
+                raise ValueError(f"Provider {self.current_provider} not found")
+        except Exception as e:
+            print(f"Error saving API key: {str(e)}")
+            raise
+            
+    def get_keys(self):
+        """Get all API keys as a list."""
+        keys = []
+        
+        # Add the key for the current provider if it exists
+        current_key = self.providers.get(self.current_provider)
+        if current_key:
+            keys.append(current_key)
+            
+        return keys
+        
+    def is_api_key_set(self):
+        """Check if an API key is set for the current provider."""
+        return self.providers.get(self.current_provider) is not None
+        
+    def remove_all_keys(self):
+        """Remove all API keys."""
+        try:
+            factory = ApiProviderFactory()
+            
+            for provider_name in self.providers.keys():
+                provider = factory.get_provider(provider_name)
+                if provider:
+                    provider.clear_api_key()
+                self.providers[provider_name] = None
+                
+            print("All API keys removed")
+        except Exception as e:
+            print(f"Error removing API keys: {str(e)}")
+            raise
+            
+    def set_api_key(self, key):
+        """Legacy method - calls save_key for compatibility."""
+        return self.save_key(key)
 
 
 class SrtGenerationView(QWidget):
     switch_to_translation = pyqtSignal()  # Signal to switch back to translation view
 
-    def __init__(self):
-        super().__init__()
-        self.video_files = []  # Store video file paths
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
         self.api_key_manager = ApiKeyManager()
-        self.current_worker = None
+        self.video_files = []
+        self.api_key = None
+        self.current_audio_file = None
+        self.current_audio_duration = None  # Store the detected duration of current audio
+        self.worker_thread = None  # Single worker thread variable for consistency
+        self.whisper_sync = None  # WhisperX synchronizer instance
+        self.temp_audio_files = []  # Track all temporary audio files for proper cleanup
+        
+        # Initialize the UI
         self.init_ui()
-        self._update_api_key_list()  # Load saved API keys into the UI
+        
+        # Try to load API key on startup
+        self._load_api_key_from_manager()
+
+    def _load_api_key_from_manager(self):
+        """Load the stored API key from the manager into the active property"""
+        if self.api_key_manager.is_api_key_set():
+            try:
+                keys = self.api_key_manager.get_keys()
+                if keys and len(keys) > 0:
+                    self.api_key = keys[0]
+                    print(f"Loaded API key from manager: {self.api_key[:4]}...{self.api_key[-4:]}")
+                    # Also set it in the AssemblyAI module
+                    aai.settings.api_key = self.api_key
+                    # Update the UI to show the loaded API key
+                    self._update_api_key_list()
+                    return True
+            except Exception as e:
+                print(f"Error loading API key from manager: {str(e)}")
+        return False
 
     def init_ui(self):
         layout = QVBoxLayout()
@@ -129,22 +201,11 @@ class SrtGenerationView(QWidget):
         file_section.addLayout(file_buttons_layout)
         layout.addLayout(file_section)
 
-        # API Provider selection
-        provider_layout = QHBoxLayout()
-        provider_label = QLabel("API Provider:")
-        self.provider_combo = QComboBox()
-        self.provider_combo.addItems(self.api_key_manager.get_available_providers())
-        self.provider_combo.setCurrentText(self.api_key_manager.get_current_provider())
-        self.provider_combo.currentTextChanged.connect(self._change_provider)
-        provider_layout.addWidget(provider_label)
-        provider_layout.addWidget(self.provider_combo)
-        layout.addLayout(provider_layout)
-
         # API Key Input Layout
         api_key_layout = QHBoxLayout()
         self.api_key_input = QLineEdit()
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key_input.setPlaceholderText("Enter your API Key")
+        self.api_key_input.setPlaceholderText("Enter your AssemblyAI API Key")
         api_key_layout.addWidget(self.api_key_input)
 
         # Button to save API Key
@@ -165,14 +226,21 @@ class SrtGenerationView(QWidget):
         layout.addWidget(remove_all_keys_btn)
 
         # File extension selection layout
-        extension_layout = QHBoxLayout()
+        output_layout = QHBoxLayout()
         extension_label = QLabel("Output Format:")
         self.file_extension_combo = QComboBox()
-        self.file_extension_combo.addItems(['.srt', '.txt', '.vtt'])  # Add options for file extensions
-        extension_layout.addWidget(extension_label)
-        extension_layout.addWidget(self.file_extension_combo)
-        extension_layout.addStretch()  # Add stretch to keep widgets on the left
-        layout.addLayout(extension_layout)
+        self.file_extension_combo.addItems([".srt", ".vtt", ".txt"])
+        self.file_extension_combo.setCurrentText(".srt")
+        output_layout.addWidget(extension_label)
+        output_layout.addWidget(self.file_extension_combo)
+        output_layout.addStretch()  # Add stretch to keep widgets on the left
+        layout.addLayout(output_layout)
+
+        # Remove the advanced sync checkbox as we'll always use advanced sync
+        # Instead, add an informational label about the sync
+        sync_info_label = QLabel("Using WhisperX for advanced subtitle synchronization")
+        sync_info_label.setToolTip("All subtitles will be synchronized using advanced AI-based alignment")
+        layout.addWidget(sync_info_label)
 
         # Progress section
         progress_layout = QVBoxLayout()
@@ -194,30 +262,57 @@ class SrtGenerationView(QWidget):
 
         self.setLayout(layout)
 
-    def _change_provider(self, provider_name: str):
-        """Handle changing the API provider."""
-        self.api_key_manager.set_provider(provider_name)
-        self._update_api_key_list()
+    def _validate_video_file(self, file_path):
+        """Check if the file is a valid video format for transcription."""
+        if not os.path.exists(file_path):
+            return False, f"File does not exist: {file_path}"
+            
+        # Check file extension
+        valid_extensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv']
+        _, ext = os.path.splitext(file_path)
+        if ext.lower() not in valid_extensions:
+            return False, f"Invalid file extension: {ext} (must be one of {', '.join(valid_extensions)})"
+            
+        # Check if file is accessible and has a reasonable size
+        try:
+            file_size = os.path.getsize(file_path)
+            if file_size < 1000:  # Less than 1KB
+                return False, f"File too small to be a valid video: {file_path}"
+            
+            # Check if file is not too large (>2GB)
+            if file_size > 2 * 1024 * 1024 * 1024:
+                print(f"Warning: Large file ({file_size / (1024*1024):.2f} MB): {file_path}")
+                
+            return True, "File is valid"
+            
+        except Exception as e:
+            return False, f"Error checking file: {str(e)}"
 
     def _handle_dropped_files(self, files: List[str]):
-        """Handle dropped video files or folders."""
-        video_extensions = VideoDropArea.VIDEO_EXTENSIONS
+        """Handle dropped video files."""
+        valid_files = []
+        invalid_files = []
         
+        # Validate each file
         for file_path in files:
-            if os.path.isdir(file_path):
-                # If it's a directory, look for video files inside
-                for root, _, filenames in os.walk(file_path):
-                    for filename in filenames:
-                        if filename.lower().endswith(video_extensions):
-                            full_path = os.path.join(root, filename)
-                            if full_path not in self.video_files:
-                                self.video_files.append(full_path)
-            elif file_path.lower().endswith(video_extensions):
-                # If it's a video file, add it directly
-                if file_path not in self.video_files:
-                    self.video_files.append(file_path)
-        
+            is_valid, message = self._validate_video_file(file_path)
+            if is_valid:
+                valid_files.append(file_path)
+            else:
+                invalid_files.append(f"{os.path.basename(file_path)}: {message}")
+                
+        # Add valid files to the list
+        if valid_files:
+            self.video_files.extend(valid_files)
         self._update_file_list()
+            
+        # Show message about invalid files
+        if invalid_files:
+            invalid_msg = "The following files could not be added:\n\n" + "\n".join(invalid_files)
+            QMessageBox.warning(self, "Invalid Files", invalid_msg)
+        
+        # Update UI
+        self.status_label.setText(f"{len(self.video_files)} video files selected")
 
     def _update_file_list(self):
         """Update the list widget with current video files."""
@@ -267,159 +362,788 @@ class SrtGenerationView(QWidget):
             self._update_file_list()
 
     def _save_api_key(self):
-        api_key = self.api_key_input.text()
+        """Save API key to the manager and validate it."""
+        api_key = self.api_key_input.text().strip()
+        
         if not api_key:
-            QMessageBox.warning(self, "Warning", "Please enter an API key")
-            return
+            self.status_label.setText("API key cannot be empty.")
+            return False
             
-        self.api_key_manager.set_api_key(api_key)
-        self._update_api_key_list()
-        self.api_key_input.clear()
-        QMessageBox.information(self, "Success", "API Key added successfully!")
+        # Validate API key format (AssemblyAI keys are 32-char hex strings)
+        if not self._validate_api_key_format(api_key):
+            self.status_label.setText("Invalid API key format. Should be a 32-character string.")
+            return False
+            
+        try:
+            # Set API key for validation
+            aai.settings.api_key = api_key
+            
+            # Test if the API key is valid by checking with AssemblyAI
+            print("Checking API key validity...")
+            self.status_label.setText("Checking API key validity...")
+            
+            # Make a small request to check if the API key is valid
+            transcriber = aai.Transcriber()
+            try:
+                # Just get account details to verify the key works
+                account = transcriber.get_account()
+                if not account:
+                    self.status_label.setText("API key validation failed: Could not retrieve account details")
+                    return False
+                    
+                print(f"API key validated: Connected to AssemblyAI account")
+                self.status_label.setText("API key validated and saved!")
+                
+                # Save the valid API key to both the manager and active property
+                self.api_key_manager.save_key(api_key)
+                self.api_key = api_key  # Set as active key
+                
+                # Clear the input field
+                self.api_key_input.clear()
+                
+                # Update the list display
+                self._update_api_key_list()
+                return True
+            except Exception as e:
+                error_message = str(e)
+                print(f"API key validation failed: {error_message}")
+                self.status_label.setText(f"Invalid API key: {error_message}")
+                return False
+        except Exception as e:
+            print(f"Error saving API key: {str(e)}")
+            self.status_label.setText(f"Error: {str(e)}")
+            return False
+            
+    def _validate_api_key_format(self, api_key):
+        """Validate the API key format (basic format check)."""
+        # AssemblyAI API keys are typically 32-character hexadecimal strings
+        import re
+        hex_pattern = re.compile(r'^[0-9a-f]{32}$')
+        return bool(hex_pattern.match(api_key.lower()))
 
     def _remove_all_api_keys(self):
-        if not self.api_key_manager.is_api_key_set():
-            QMessageBox.warning(self, "Warning", "No API keys to remove")
-            return
-            
+        """Remove all API keys."""
         reply = QMessageBox.question(
             self,
-            "Confirm Remove",
+            "Confirm Removal",
             "Are you sure you want to remove all API keys?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
         
         if reply == QMessageBox.StandardButton.Yes:
-            self.api_key_list.clear()
-            self.api_key_manager.set_api_key(None)  # Clear the stored API key
-            QMessageBox.information(self, "Success", "All API Keys removed successfully!")
+            try:
+                # Clear the API key list widget
+                self.api_key_list.clear()
+                
+                # Clear keys from manager
+                self.api_key_manager.remove_all_keys()
+                
+                # Clear current key
+                self.api_key = None
+                
+                # Update status
+                self.status_label.setText("All API keys removed. Please add a new key.")
+                
+                QMessageBox.information(self, "Success", "All API Keys removed successfully!")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to remove API keys: {str(e)}")
+                print(f"Error removing API keys: {str(e)}")
 
     def _generate_srt(self):
-        if not self.video_files:
-            QMessageBox.warning(self, "Warning", "No video files to process!")
-            return
-
-        if not self.api_key_manager.is_api_key_set():
-            QMessageBox.warning(self, "Warning", "Please add an API key")
-            return
-
-        # Clean up any existing worker
-        if self.current_worker:
-            if self.current_worker.isRunning():
-                self.current_worker.quit()
-                self.current_worker.wait()
-            self.current_worker.deleteLater()
-
-        # Start async transcription
-        self.current_worker = run_async(self._generate_srt_async)
-        self.current_worker.finished.connect(self._on_transcription_finished)
-        self.current_worker.error.connect(self._on_transcription_error)
-
-    async def _generate_srt_async(self):
-        try:
-            total_files = len(self.video_files)
-            transcribed_files = []
-            provider = self.api_key_manager.get_current_provider()
-
-            if provider == "AssemblyAI":
-                # Set API key for AssemblyAI
-                api_key = self.api_key_manager.get_keys()[0]
-                aai.settings.api_key = api_key
-
-                for file_index, file_path in enumerate(self.video_files):
-                    self.status_label.setText(f"Processing file {file_index + 1} of {total_files}: {os.path.basename(file_path)}")
-
-                    try:
-                        # Transcribe the file using AssemblyAI
-                        transcriber = aai.Transcriber()
-                        transcript = transcriber.transcribe(file_path)
-
-                        if transcript.status == aai.TranscriptStatus.error:
-                            raise ValueError(transcript.error)
-
-                        # Save the transcript to a file with the selected extension
-                        selected_extension = self.file_extension_combo.currentText()
-                        output_file = os.path.splitext(file_path)[0] + selected_extension
-                        with open(output_file, 'w', encoding='utf-8') as f:
-                            f.write(transcript.text)
-
-                        transcribed_files.append(output_file)
-
-                        # Update progress
-                        progress = ((file_index + 1) * 100) / total_files
-                        self.progress_bar.setValue(int(progress))
-
-                    except Exception as e:
-                        raise ValueError(f"Error processing file {file_path}: {str(e)}")
-                        
-            elif provider == "Groq":
-                # Use Groq transcription service
-                from ..core.groq_transcription_service import GroqTranscriptionService
-                groq_service = GroqTranscriptionService()
-                
-                # Get the API key
-                if not self.api_key_manager.get_keys():
-                    raise ValueError("No Groq API key found")
-                
-                # Process each file
-                for file_index, file_path in enumerate(self.video_files):
-                    self.status_label.setText(f"Processing file {file_index + 1} of {total_files}: {os.path.basename(file_path)}")
-                    
-                    try:
-                        # Transcribe using Groq
-                        transcription = groq_service.transcribe(file_path)
-                        
-                        # Save the transcript to a file with the selected extension
-                        selected_extension = self.file_extension_combo.currentText()
-                        output_file = os.path.splitext(file_path)[0] + selected_extension
-                        with open(output_file, 'w', encoding='utf-8') as f:
-                            f.write(transcription)
-                            
-                        transcribed_files.append(output_file)
-                        
-                        # Update progress
-                        progress = ((file_index + 1) * 100) / total_files
-                        self.progress_bar.setValue(int(progress))
-                        
-                    except Exception as e:
-                        raise ValueError(f"Error processing file {file_path}: {str(e)}")
-
-            return transcribed_files
-
-        except Exception as e:
-            self.status_label.setText(f"Error: {str(e)}")
-            raise e
-
-    def _on_transcription_finished(self, transcribed_files):
-        if not transcribed_files:
-            self.status_label.setText("No files were transcribed")
-            return
-
-        # Show success message with list of transcribed files
-        message = "Transcription completed successfully!\n\nTranscribed files:"
-        for file in transcribed_files:
-            message += f"\n- {file}"
-
-        QMessageBox.information(self, "Success", message)
-        self.status_label.setText("Transcription completed successfully")
+        """Generate SRT files for the selected videos"""
+        # Reset progress state
         self.progress_bar.setValue(0)
+        
+        # Get video files
+        video_files = [self.video_files[i] for i in range(self.file_list.count())]
+        
+        if not video_files:
+            QMessageBox.warning(self, "No Files", "No video files have been added. Please add files first.")
+            return
 
-        # Clear the file list
-        self._clear_files()
+        # Check if we have a non-empty API key in the input field
+        input_api_key = self.api_key_input.text().strip()
+        if input_api_key:
+            # User has entered a new key, try to save it
+            if not self._save_api_key():
+                return  # Save failed, don't proceed
+        elif not self.api_key:
+            # No API key in input field and no stored key, try to load from manager
+            if not self._load_api_key_from_manager():
+                QMessageBox.warning(self, "API Key Required", "Please enter a valid AssemblyAI API key")
+                return
+
+        # At this point, self.api_key should be set if we have a valid key
+        if not self.api_key:
+            QMessageBox.warning(self, "API Key Required", "No valid API key available. Please enter a valid AssemblyAI API key")
+            return
+        
+        # Double-check that the API key is set in the AssemblyAI settings
+        aai.settings.api_key = self.api_key
+            
+        # Check for existing worker and stop it if running
+        if self.worker_thread:
+            print("Stopping existing transcription thread")
+            try:
+                self.worker_thread.stop()
+                self.worker_thread = None
+                # Give a moment for thread cleanup
+                QCoreApplication.processEvents()
+            except Exception as e:
+                print(f"Error stopping worker thread: {str(e)}")
+        
+        # Update status
+        self.status_label.setText("Starting transcription...")
+        QCoreApplication.processEvents()  # Force UI update
+        
+        # Create a wrapper function to run the async method
+        async def run_generation():
+            return await self._generate_srt_async(video_files)
+        
+        # Start async operation with progress updates - pass the function itself, not the coroutine
+        self.worker_thread = run_async(
+            run_generation,
+            on_success=self._on_transcription_finished,
+            on_error=self._on_transcription_error
+        )
+
+    def _on_transcription_finished(self, result):
+        """Handle completed transcription"""
+        print("Transcription completed successfully")
+        
+        # Set progress bar to 100%
+        self.progress_bar.setValue(100)
+        QCoreApplication.processEvents()  # Force UI update
+        
+        # Clean up the worker thread reference
+        self.worker_thread = None
+        
+        # Ensure all temporary files are cleaned up
+        self._cleanup_temp_files()
+        
+        # Display success message after cleanup operations
+        if result and isinstance(result, str):
+            self.status_label.setText(result)
+            # Use a very short timer to show the message box to allow UI to update first
+            QTimer.singleShot(100, lambda: QMessageBox.information(self, "Transcription Complete", result))
+        else:
+            success_msg = "Transcription complete."
+            self.status_label.setText(success_msg)
+            # Use a very short timer to show the message box to allow UI to update first
+            QTimer.singleShot(100, lambda: QMessageBox.information(self, "Transcription Complete", success_msg))
 
     def _on_transcription_error(self, error):
-        self.status_label.setText(f"Error: {str(error)}")
-        QMessageBox.critical(self, "Error", str(error))
-        self.progress_bar.setValue(0)
+        """Handle transcription error"""
+        print(f"Transcription error: {str(error)}")
+        
+        # Clean up the worker thread reference
+        self.worker_thread = None
+        
+        # Ensure all temporary files are cleaned up
+        self._cleanup_temp_files()
+        
+        # Display error message
+        error_msg = f"Error during transcription: {str(error)}"
+        self.status_label.setText(error_msg)
+        # Use a timer to show message box to prevent UI freezing
+        QTimer.singleShot(100, lambda: QMessageBox.critical(self, "Transcription Error", error_msg))
 
+    def _cleanup_temp_files(self):
+        """Clean up all temporary audio files"""
+        if not self.temp_audio_files:
+            return
+            
+        print(f"Cleaning up {len(self.temp_audio_files)} temporary audio files...")
+        successful_deletions = 0
+        for audio_file in self.temp_audio_files[:]:  # Use a copy of the list for safe iteration
+            try:
+                if os.path.exists(audio_file):
+                    print(f"Deleting temporary audio file: {audio_file}")
+                    os.remove(audio_file)
+                    successful_deletions += 1
+                self.temp_audio_files.remove(audio_file)  # Remove from list regardless of existence
+            except Exception as e:
+                print(f"Error deleting temporary audio file {audio_file}: {str(e)}")
+                # Continue with other files even if this one fails
+        
+        print(f"Successfully cleaned up {successful_deletions} temporary audio files")
+        # Reset the audio file references
+        self.temp_audio_files = []
+        self.current_audio_file = None
+
+    async def _generate_srt_async(self, video_files):
+        """Asynchronously generate SRTs from video files"""
+        try:
+            total_files = len(video_files)
+            successful_files = 0
+            
+            for i, video_file in enumerate(video_files):
+                # Update progress bar at the start of processing each file
+                progress_percent = int((i / total_files) * 100)
+                self.progress_bar.setValue(progress_percent)
+                QCoreApplication.processEvents()  # Ensure UI updates
+                
+                current_status = f"Processing video {i+1}/{total_files}: {os.path.basename(video_file)}"
+                print(current_status)
+                self.status_label.setText(current_status)
+                QCoreApplication.processEvents()  # Ensure UI updates
+                
+                try:
+                    # Extract audio from video
+                    self.progress_bar.setValue(int(progress_percent + (5/total_files)))
+                    QCoreApplication.processEvents()  # Force UI update
+                    
+                    audio_path = await self._extract_audio(video_file)
+                    if not audio_path:
+                        print(f"Failed to extract audio from {video_file}")
+                        continue
+                    
+                    # Transcribe audio using assemblyai
+                    self.progress_bar.setValue(int(progress_percent + (25/total_files)))
+                    QCoreApplication.processEvents()  # Force UI update
+                    
+                    status_msg = f"{current_status} - Transcribing..."
+                    print(status_msg)
+                    self.status_label.setText(status_msg)
+                    QCoreApplication.processEvents()  # Force UI update
+                    
+                    # Create transcript
+                    transcript = await self._create_transcript(audio_path)
+                    if not transcript:
+                        print(f"Failed to create transcript for {video_file}")
+                        continue
+                    
+                    # Generate SRT file
+                    self.progress_bar.setValue(int(progress_percent + (80/total_files)))
+                    QCoreApplication.processEvents()  # Force UI update
+                    
+                    status_msg = f"{current_status} - Formatting subtitles..."
+                    self.status_label.setText(status_msg)
+                    QCoreApplication.processEvents()  # Force UI update
+                    
+                    srt_path = self._get_srt_path(video_file)
+                    srt_content = self._format_srt(transcript, self.current_audio_duration)
+                    
+                    # Save SRT file
+                    with open(srt_path, 'w', encoding='utf-8') as f:
+                        f.write(srt_content)
+                    
+                    print(f"Saved SRT file: {srt_path}")
+                    successful_files += 1
+                    
+                    # Set progress for this file complete
+                    self.progress_bar.setValue(int(progress_percent + (100/total_files)))
+                    QCoreApplication.processEvents()  # Force UI update
+                except Exception as e:
+                    print(f"Error processing {video_file}: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    # Continue with next file
+            
+            # Set progress to 100% when complete
+            self.progress_bar.setValue(100)
+            QCoreApplication.processEvents()  # Force UI update
+            
+            # Final status message
+            if successful_files > 0:
+                success_msg = f"Successfully transcribed {successful_files}/{total_files} files."
+                self.status_label.setText(success_msg)
+                return success_msg
+            else:
+                error_msg = "No files were transcribed. Check the API key and try again."
+                self.status_label.setText(error_msg)
+                return error_msg
+        except Exception as e:
+            print(f"Error in _generate_srt_async: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise e
+
+    async def _extract_audio(self, video_path):
+        """Extract audio from video file."""
+        try:
+            print(f"Extracting audio from {video_path}")
+            self.status_label.setText(f"Extracting audio from {os.path.basename(video_path)}...")
+            QCoreApplication.processEvents()  # Force UI update
+            
+            # Get output path for the audio file
+            output_dir = os.path.dirname(video_path)
+            output_filename = os.path.splitext(os.path.basename(video_path))[0] + '.wav'
+            output_path = os.path.join(output_dir, output_filename)
+            
+            # Optimized ffmpeg command to extract audio - use higher bitrate for better quality
+            ffmpeg_cmd = [
+                'ffmpeg', '-i', video_path, 
+                '-vn',  # No video
+                '-acodec', 'pcm_s16le',  # Convert to WAV
+                '-ar', '16000',  # 16kHz sample rate (optimal for speech recognition)
+                '-ac', '1',  # Mono
+                '-y',  # Overwrite output file if it exists
+                '-loglevel', 'error',  # Reduce logging output for performance
+                output_path
+            ]
+            
+            # Execute ffmpeg
+            print(f"Running ffmpeg: {' '.join(ffmpeg_cmd)}")
+            process = await asyncio.create_subprocess_exec(
+                *ffmpeg_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            # Wait for the process to complete
+            stdout, stderr = await process.communicate()
+            
+            # Check if process was successful
+            if process.returncode != 0:
+                error_msg = stderr.decode() if stderr else "Unknown ffmpeg error"
+                print(f"Error extracting audio: {error_msg}")
+                self.status_label.setText(f"Error extracting audio: {error_msg}")
+                QCoreApplication.processEvents()  # Force UI update
+                return None
+                
+            # Get the duration of the audio file
+            if os.path.exists(output_path):
+                try:
+                    with wave.open(output_path, 'rb') as wf:
+                        # Calculate duration from wave file properties
+                        frames = wf.getnframes()
+                        rate = wf.getframerate()
+                        duration = frames / float(rate)
+                        print(f"Extracted audio duration: {duration:.2f} seconds")
+                        
+                        # Store the duration for later use in timestamp validation
+                        self.current_audio_duration = duration
+                except Exception as e:
+                    print(f"Error reading audio duration: {str(e)}")
+                    self.current_audio_duration = None
+            
+                print(f"Audio extracted successfully to {output_path}")
+                # Add to temp files list for later cleanup
+                if output_path not in self.temp_audio_files:
+                    self.temp_audio_files.append(output_path)
+                return output_path
+            else:
+                print(f"Output audio file not found: {output_path}")
+                return None
+        except Exception as e:
+            print(f"Error during audio extraction: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            self.status_label.setText(f"Error during audio extraction: {str(e)}")
+            QCoreApplication.processEvents()  # Force UI update
+            return None
+
+    def closeEvent(self, event):
+        """Handle cleanup when the widget is closed"""
+        print("SrtGenerationView is closing, cleaning up resources...")
+        
+        # Stop any running worker thread
+        if self.worker_thread:
+            print("Stopping running transcription thread...")
+            try:
+                self.worker_thread.stop()
+                self.worker_thread = None
+            except Exception as e:
+                print(f"Error stopping worker thread: {str(e)}")
+        
+        # Clean up any temporary files
+        self._cleanup_temp_files()
+        
+        # Clean up WhisperX synchronizer if it exists
+        if self.whisper_sync:
+            try:
+                self.whisper_sync._cleanup_gpu()
+                self.whisper_sync = None
+            except Exception as e:
+                print(f"Error cleaning up WhisperX synchronizer: {str(e)}")
+        
+        # Run base class closeEvent to ensure proper Qt cleanup
+        super().closeEvent(event)
+
+    def _get_srt_path(self, video_path):
+        """Get the path for the SRT file"""
+        return os.path.splitext(video_path)[0] + '.srt'
+    
+    def _format_srt(self, utterances, video_duration=None):
+        """Format utterances into SRT format with WhisperX synchronization."""
+        if not utterances:
+            print("No utterances provided for SRT formatting")
+            return "1\n00:00:00,000 --> 00:00:05,000\nNo transcription available.\n"
+            
+        # Check if utterances have start/end times
+        has_timing = hasattr(utterances[0], 'start') and hasattr(utterances[0], 'end')
+        
+        # If we don't have timing information, use sentence-based approach
+        if not has_timing:
+            print("Utterances don't have timing information, using sentence-based SRT generation")
+            sentences = [u.text for u in utterances if hasattr(u, 'text')]
+            return self._generate_srt_from_sentences(sentences, video_duration)
+        
+        # Try to get more accurate video duration if not provided
+        if not video_duration and self.current_audio_file and os.path.exists(self.current_audio_file):
+            try:
+                with wave.open(self.current_audio_file, 'rb') as wf:
+                    # Calculate duration from wave file properties
+                    frames = wf.getnframes()
+                    rate = wf.getframerate()
+                    video_duration = frames / float(rate)
+                    print(f"Detected audio duration from wave file: {video_duration:.2f}s")
+            except Exception as e:
+                print(f"Error detecting duration from audio file: {str(e)}")
+        
+        # CRITICAL FIX: If we have a known duration from the audio file, use it to scale timestamps
+        subtitle_intervals = [(utterance.start, utterance.end) for utterance in utterances]
+        subtitle_texts = [utterance.text for utterance in utterances]
+        
+        # Check if we need to scale timestamps
+        max_initial_timestamp = max([end for _, end in subtitle_intervals]) if subtitle_intervals else 0
+        print(f"Max initial timestamp: {max_initial_timestamp:.2f}s")
+        
+        # Force timestamp scaling if:
+        # 1. We have audio duration information
+        # 2. The max timestamp is significantly different from the audio duration 
+        # (either too long or too short by more than 20%)
+        force_scaling = False
+        if video_duration and max_initial_timestamp > 0:
+            # Calculate how far off the timestamps are
+            ratio = max_initial_timestamp / video_duration
+            print(f"Timestamp ratio: {ratio:.2f} (timestamps / duration)")
+            
+            # If timestamps are more than 20% off from the actual duration, force scaling
+            if ratio > 1.2 or ratio < 0.8:
+                print(f"Timestamps are significantly off from actual duration: {ratio:.2f}x difference")
+                print(f"Max timestamp: {max_initial_timestamp:.2f}s, Audio duration: {video_duration:.2f}s")
+                force_scaling = True
+        
+        # Apply pre-scaling if timestamps are way off (more than 1 hour for a short video)
+        # or if we detect a significant difference from the known duration
+        if max_initial_timestamp > 3600 or force_scaling:
+            print("Applying pre-synchronization scaling to fix timestamp issues")
+            
+            # If we have a known duration, scale to it, otherwise use a reasonable default
+            scaling_target = video_duration if video_duration else 60  # Default to 1 minute if unknown
+            scale_factor = scaling_target / max_initial_timestamp
+            subtitle_intervals = [(start * scale_factor, end * scale_factor) 
+                                 for start, end in subtitle_intervals]
+            print(f"Pre-scaled timestamps by factor of {scale_factor:.6f}")
+            
+        # Initialize WhisperX synchronizer if we have an audio file
+        sync_successful = False
+        aligned_intervals = None
+        
+        # Try to use WhisperX for better alignment if audio file is available
+        if self.current_audio_file and os.path.exists(self.current_audio_file):
+            try:
+                print(f"Synchronizing subtitles with audio using WhisperX...")
+                
+                # Initialize WhisperX synchronizer if needed
+                if not self.whisper_sync:
+                    print("Initializing WhisperSynchronizer...")
+                    self.whisper_sync = WhisperSynchronizer(model_size="base")
+                
+                # Use our stored audio duration if available
+                if not video_duration and hasattr(self, 'current_audio_duration') and self.current_audio_duration:
+                    print(f"Using detected audio duration: {self.current_audio_duration:.2f}s")
+                    video_duration = self.current_audio_duration
+                
+                # Run synchronization
+                aligned_intervals = self.whisper_sync.synchronize(
+                    self.current_audio_file,
+                    subtitle_intervals,
+                    subtitle_texts,
+                    video_duration
+                )
+                
+                if aligned_intervals and len(aligned_intervals) == len(subtitle_texts):
+                    sync_successful = True
+                    print("WhisperX synchronization successful!")
+                else:
+                    print("WhisperX synchronization failed or returned incorrect number of intervals")
+                    
+            except Exception as e:
+                print(f"Error during WhisperX synchronization: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                # Continue with original intervals
+        else:
+            print("No audio file available for synchronization, using original timing")
+        
+        # Use aligned intervals if available, otherwise use original intervals
+        intervals_to_use = aligned_intervals if sync_successful else subtitle_intervals
+        
+        # Final validation: Perform an emergency check for unreasonable timestamps
+        # This is our last defense against extreme timestamp values
+        if intervals_to_use:
+            max_time = max([end for _, end in intervals_to_use])
+            reasonable_max = video_duration * 1.1 if video_duration else 3600  # 10% margin over audio duration
+            
+            if max_time > reasonable_max:
+                print(f"CRITICAL: Final timestamps still unreasonable after synchronization (max: {max_time:.2f}s)")
+                print("Applying emergency timestamp correction")
+                
+                # If we have video_duration, use it, otherwise use a safe default
+                target_duration = video_duration if video_duration else 60  # Default to 1 minute
+                
+                # Distribute evenly across target duration
+                total_segments = len(intervals_to_use)
+                segment_duration = target_duration / total_segments
+                
+                intervals_to_use = [
+                    (i * segment_duration, min((i + 1) * segment_duration, target_duration))
+                    for i in range(total_segments)
+                ]
+                print(f"Emergency correction applied - {total_segments} segments distributed across {target_duration:.2f}s")
+        
+        # Generate SRT format
+        srt_lines = []
+        
+        for i, ((start, end), text) in enumerate(zip(intervals_to_use, subtitle_texts)):
+            # Skip empty segments
+            if not text.strip():
+                continue
+                
+            # Format timestamps
+            start_time = self._format_timestamp_srt(start)
+            end_time = self._format_timestamp_srt(end)
+            
+            # Add SRT entry
+            srt_lines.append(f"{i+1}")
+            srt_lines.append(f"{start_time} --> {end_time}")
+            srt_lines.append(text)
+            srt_lines.append("")  # Empty line between entries
+            
+        # Return the SRT content
+        return "\n".join(srt_lines)
+    
+    def _format_timestamp_srt(self, seconds):
+        """Format seconds to SRT timestamp format (HH:MM:SS,mmm)."""
+        # Safety check - cap timestamps at a reasonable maximum (10 hours)
+        MAX_REASONABLE_TIME = 10 * 60 * 60  # 10 hours in seconds
+        
+        # Ensure seconds is a valid number
+        if not isinstance(seconds, (int, float)) or seconds < 0:
+            print(f"Warning: Invalid timestamp value ({seconds}), defaulting to 0")
+            seconds = 0
+        
+        # Apply reasonable upper bound
+        if seconds > MAX_REASONABLE_TIME:
+            print(f"Warning: Extremely large timestamp detected ({seconds:.2f}s), capping at {MAX_REASONABLE_TIME/3600} hours")
+            seconds = MAX_REASONABLE_TIME
+            
+        # Format the timestamp
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        millisecs = int((seconds % 1) * 1000)
+        
+        return f"{hours:02d}:{minutes:02d}:{secs:02d},{millisecs:03d}"
+    
+    def _split_text_into_sentences(self, text):
+        """Split text into sentences for formatting when timings are not available."""
+        # Enhanced sentence splitting logic
+        # First, break on standard punctuation
+        partial_sentences = re.split(r'(?<=[.!?])\s+', text)
+        
+        sentences = []
+        # Then, process long sentences that might need further splitting
+        for sentence in partial_sentences:
+            if len(sentence.split()) > 15:  # If a sentence is very long
+                # Try to split on commas, semicolons, colons, or dashes
+                chunks = re.split(r'(?<=[,;:\-])\s+', sentence)
+                sentences.extend(chunks)
+            else:
+                sentences.append(sentence)
+                
+        return [s.strip() for s in sentences if s.strip()]
+    
+    def _generate_srt_from_sentences(self, sentences, video_duration=None):
+        """Generate SRT format from sentences with estimated times, optimized for shorter segments."""
+        srt_content = []
+        
+        # First, split long sentences into smaller chunks
+        segments = []
+        for sentence in sentences:
+            words = sentence.split()
+            # For very long sentences, split them into smaller chunks
+            max_words_per_segment = 10  # Maximum words per segment
+            
+            if len(words) <= max_words_per_segment:
+                segments.append(sentence)
+            else:
+                # Split into multiple segments
+                for i in range(0, len(words), max_words_per_segment):
+                    segment = " ".join(words[i:i+max_words_per_segment])
+                    segments.append(segment)
+        
+        # Use the video duration to calculate appropriate timing if available
+        total_segments = len(segments)
+        if video_duration and total_segments > 0:
+            # Divide the video duration by the number of segments
+            avg_seconds_per_segment = video_duration / total_segments
+        else:
+            avg_seconds_per_segment = 2.5  # Default estimate - shorter for better syncing
+        
+        # NO overlap - each segment has a distinct time range
+        for i, segment in enumerate(segments):
+            # Calculate timings WITHOUT overlap - each segment gets its own time slot
+            start_seconds = i * avg_seconds_per_segment
+            end_seconds = min(
+                (i + 1) * avg_seconds_per_segment,
+                video_duration if video_duration else float('inf')
+            )
+            
+            # Ensure no overlap by adding a small buffer between segments
+            if i > 0:
+                start_seconds += 0.01  # Add 10ms to prevent exact overlap with previous segment
+            
+            start_time = self._format_timestamp_srt(start_seconds)
+            end_time = self._format_timestamp_srt(end_seconds)
+            
+            srt_content.append(f"{i+1}")
+            srt_content.append(f"{start_time} --> {end_time}")
+            srt_content.append(segment)
+            srt_content.append("")  # Empty line between entries
+        
+        return "\n".join(srt_content)
+    
     def _update_api_key_list(self):
         """Update the list of API keys in the UI."""
         self.api_key_list.clear()
-        api_keys = self.api_key_manager.get_keys()
-        provider = self.api_key_manager.get_current_provider()
         
-        for api_key in api_keys:
-            # Mask the key to show only first 5 and last 3 characters with asterisks
-            masked_key = f"{api_key[:5]}{'*' * 6}{api_key[-3:]}" if len(api_key) > 8 else "*" * len(api_key)
-            self.api_key_list.addItem(f"{provider} API Key: {masked_key}")
+        try:
+            keys = self.api_key_manager.get_keys()
+            for key in keys:
+                # Mask the API key for display (show first 4 and last 4 chars)
+                if len(key) > 8:
+                    masked_key = f"{key[:4]}{'*' * (len(key) - 8)}{key[-4:]}"
+                else:
+                    masked_key = "****" 
+                self.api_key_list.addItem(f"AssemblyAI API Key: {masked_key}")
+            
+            # Update status message if we have keys
+            if keys:
+                self.api_key = keys[0]  # Set the first key as active
+                aai.settings.api_key = self.api_key  # Set in AssemblyAI
+                self.status_label.setText("API key loaded. Ready to transcribe.")
+            else:
+                self.status_label.setText("Please set your AssemblyAI API key first.")
+        except Exception as e:
+            print(f"Error updating API key list: {str(e)}")
+            self.status_label.setText("Error loading API keys.")
+
+    async def _create_transcript(self, audio_path):
+        """Create transcript using AssemblyAI"""
+        try:
+            # Make sure the API key is set
+            if not self.api_key:
+                print("API key not set. Transcription cannot proceed.")
+                return None
+                
+            # Configure assemblyai
+            aai.settings.api_key = self.api_key
+            print(f"Using API key: {self.api_key[:4]}...{self.api_key[-4:]} (length: {len(self.api_key)})")
+            
+            # Create a transcriber
+            transcriber = aai.Transcriber()
+            
+            print(f"Starting transcription for {audio_path}")
+            
+            # Use run_async_operation to run transcribe in a background thread
+            # The transcribe method handles both upload and transcription in one call
+            transcript = await self._run_async_operation(
+                lambda: transcriber.transcribe(audio_path)
+            )
+            
+            # Check if we got a valid transcript
+            if transcript is None:
+                print("Transcription failed - no transcript returned")
+                return None
+                
+            # Debug: Log the transcript structure to understand it
+            print(f"Transcript type: {type(transcript)}")
+            print(f"Transcript attributes: {dir(transcript)}")
+            
+            # Check for utterances or similar structure in the transcript
+            if hasattr(transcript, 'utterances') and transcript.utterances:
+                print(f"Found {len(transcript.utterances)} utterances")
+                return transcript.utterances
+            elif hasattr(transcript, 'words') and transcript.words:
+                print(f"Found {len(transcript.words)} words, converting to utterances format")
+                # Convert words to utterance-like format if needed
+                return self._convert_words_to_utterances(transcript.words)
+            else:
+                print("No utterances or words found in transcript")
+                # Try to access transcript text directly
+                if hasattr(transcript, 'text') and transcript.text:
+                    print("Found transcript text, creating utterances from sentences")
+                    sentences = self._split_text_into_sentences(transcript.text)
+                    return [SimpleUtterance(text=s) for s in sentences]
+                return None
+        except Exception as e:
+            print(f"Error creating transcript: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
+            
+    def _convert_words_to_utterances(self, words):
+        """Convert word-level transcription to utterance format"""
+        if not words:
+            return []
+            
+        # Group words into sentences based on punctuation
+        utterances = []
+        current_utterance = []
+        current_start = None
+        
+        for word in words:
+            if current_start is None:
+                current_start = word.start
+                
+            current_utterance.append(word.text)
+            
+            # Check if this word ends a sentence
+            if word.text.endswith(('.', '!', '?')) or len(current_utterance) > 15:
+                # Create a new utterance
+                text = ' '.join(current_utterance)
+                utterances.append(SimpleUtterance(
+                    text=text,
+                    start=current_start,
+                    end=word.end
+                ))
+                
+                # Reset for next utterance
+                current_utterance = []
+                current_start = None
+                
+        # Add any remaining words as a final utterance
+        if current_utterance:
+            text = ' '.join(current_utterance)
+            utterances.append(SimpleUtterance(
+                text=text,
+                start=current_start,
+                end=words[-1].end
+            ))
+            
+        return utterances
+        
+    async def _run_async_operation(self, operation_func):
+        """Run an operation asynchronously using loop.run_in_executor"""
+        loop = asyncio.get_event_loop()
+        try:
+            # Run the operation in a separate thread
+            result = await loop.run_in_executor(None, operation_func)
+            return result
+        except Exception as e:
+            print(f"Error in async operation: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise
+
+class SimpleUtterance:
+    """Simple class to represent an utterance with text and timing"""
+    def __init__(self, text, start=0, end=0):
+        self.text = text
+        self.start = start
+        self.end = end

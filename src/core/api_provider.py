@@ -33,6 +33,21 @@ class ApiProvider(ABC):
     def get_available_models(self) -> List[str]:
         """Get all available models for this provider"""
         pass
+        
+    @abstractmethod
+    def get_api_key(self) -> Optional[str]:
+        """Get the current API key (first one if multiple exist)"""
+        pass
+        
+    @abstractmethod
+    def set_api_key(self, key: str) -> None:
+        """Set a single API key (replacing any existing ones)"""
+        pass
+        
+    @abstractmethod
+    def clear_api_key(self) -> None:
+        """Clear the current API key"""
+        pass
 
 
 class OpenRouterProvider(ApiProvider):
@@ -66,6 +81,20 @@ class OpenRouterProvider(ApiProvider):
             "meta-llama/llama-3-70b-instruct",
             "google/gemini-pro"
         ]
+    
+    def get_api_key(self) -> Optional[str]:
+        """Get the current API key (first one if multiple exist)"""
+        keys = self.get_keys()
+        return keys[0] if keys else None
+        
+    def set_api_key(self, key: str) -> None:
+        """Set a single API key (replacing any existing ones)"""
+        self.remove_all_keys()
+        self.add_key(key)
+        
+    def clear_api_key(self) -> None:
+        """Clear the current API key"""
+        self.remove_all_keys()
 
 
 class GroqProvider(ApiProvider):
@@ -96,6 +125,20 @@ class GroqProvider(ApiProvider):
             "llama-guard-3-8b",
             "llama-3.1-8b-instant"
         ]
+    
+    def get_api_key(self) -> Optional[str]:
+        """Get the current API key (first one if multiple exist)"""
+        keys = self.get_keys()
+        return keys[0] if keys else None
+        
+    def set_api_key(self, key: str) -> None:
+        """Set a single API key (replacing any existing ones)"""
+        self.remove_all_keys()
+        self.add_key(key)
+        
+    def clear_api_key(self) -> None:
+        """Clear the current API key"""
+        self.remove_all_keys()
 
 
 class AssemblyAIProvider(ApiProvider):
@@ -124,6 +167,20 @@ class AssemblyAIProvider(ApiProvider):
         # AssemblyAI doesn't have model selection in the current implementation
         return ["default"]
     
+    def get_api_key(self) -> Optional[str]:
+        """Get the current API key (first one if multiple exist)"""
+        keys = self.get_keys()
+        return keys[0] if keys else None
+        
+    def set_api_key(self, key: str) -> None:
+        """Set a single API key (replacing any existing ones)"""
+        self.remove_all_keys()
+        self.add_key(key)
+        
+    def clear_api_key(self) -> None:
+        """Clear the current API key"""
+        self.remove_all_keys()
+
 
 class ApiProviderFactory:
     """Factory for creating API providers (Factory Method Pattern)"""
