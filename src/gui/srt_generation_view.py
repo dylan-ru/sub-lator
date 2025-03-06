@@ -588,21 +588,56 @@ class SrtGenerationView(QWidget):
                     self.worker_thread = None
                 except Exception as e:
                     print(f"Error cleaning up worker thread: {str(e)}")
-                    # Continue despite error
             
-            # Process the next video
-            self._process_next_video()
+            # Clean up resources from current video
+            self._cleanup_current_video_resources()
+            
+            # Schedule next video processing with QTimer
+            # This breaks the recursive chain and allows the call stack to clear
+            QTimer.singleShot(100, self._process_next_video)
+            
         except Exception as e:
             print(f"Error in video completion handler: {str(e)}")
             import traceback
             traceback.print_exc()
             
-            # Try to continue processing the next video despite error
-            try:
-                self._process_next_video()
-            except Exception as next_error:
-                print(f"Error trying to process next video: {str(next_error)}")
-    
+            # Schedule next video despite error
+            QTimer.singleShot(100, self._process_next_video)
+
+    def _cleanup_current_video_resources(self):
+        """Clean up resources for the current video before processing next"""
+        try:
+            # Clean up WhisperX resources if needed
+            if self.whisper_sync:
+                try:
+                    self.whisper_sync._cleanup_gpu()
+                except Exception as e:
+                    print(f"Error cleaning up WhisperX: {str(e)}")
+            
+            # Clean up current audio file
+            if self.current_audio_file and os.path.exists(self.current_audio_file):
+                try:
+                    os.remove(self.current_audio_file)
+                    if self.current_audio_file in self.temp_audio_files:
+                        self.temp_audio_files.remove(self.current_audio_file)
+                except Exception as e:
+                    print(f"Error removing current audio file: {str(e)}")
+            
+            # Reset current video resources
+            self.current_audio_file = None
+            self.current_audio_duration = None
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+            
+            # Process any pending events
+            QCoreApplication.processEvents()
+            
+        except Exception as e:
+            print(f"Error in current video cleanup: {str(e)}")
+            # Continue despite cleanup errors
+
     def _on_single_video_error(self, error):
         """Handle error during processing of a single video"""
         try:
@@ -620,20 +655,20 @@ class SrtGenerationView(QWidget):
                     self.worker_thread = None
                 except Exception as e:
                     print(f"Error cleaning up worker thread after error: {str(e)}")
-                    # Continue despite error
             
-            # Process the next video despite the error
-            self._process_next_video()
+            # Clean up resources from current video
+            self._cleanup_current_video_resources()
+            
+            # Schedule next video processing with QTimer
+            QTimer.singleShot(100, self._process_next_video)
+            
         except Exception as e:
             print(f"Error in error handler: {str(e)}")
             import traceback
             traceback.print_exc()
             
-            # Try to continue processing the next video despite error in error handler
-            try:
-                self._process_next_video()
-            except Exception as next_error:
-                print(f"Error trying to process next video after error: {str(next_error)}")
+            # Schedule next video despite error in error handler
+            QTimer.singleShot(100, self._process_next_video)
     
     def _on_all_videos_finished(self):
         """Handle completion of all videos"""
