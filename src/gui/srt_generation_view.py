@@ -690,17 +690,23 @@ class SrtGenerationView(QWidget):
             if self.successful_videos > 0:
                 success_msg = f"Successfully transcribed {self.successful_videos}/{self.total_videos} files."
                 self.status_label.setText(success_msg)
-                # Use a non-modal message box
-                msg_box = QMessageBox(QMessageBox.Information, "Transcription Complete", success_msg, 
-                                     QMessageBox.Ok, self)
+                # Create message box with new style
+                msg_box = QMessageBox(self)  # Create with parent only
+                msg_box.setIcon(QMessageBox.Icon.Information)
+                msg_box.setWindowTitle("Transcription Complete")
+                msg_box.setText(success_msg)
+                msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
                 msg_box.setModal(False)
                 msg_box.show()
             else:
                 error_msg = "No files were transcribed. Check the API key and try again."
                 self.status_label.setText(error_msg)
-                # Use a non-modal message box
-                msg_box = QMessageBox(QMessageBox.Warning, "Transcription Failed", error_msg, 
-                                     QMessageBox.Ok, self)
+                # Create message box with new style
+                msg_box = QMessageBox(self)  # Create with parent only
+                msg_box.setIcon(QMessageBox.Icon.Warning)
+                msg_box.setWindowTitle("Transcription Failed")
+                msg_box.setText(error_msg)
+                msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
                 msg_box.setModal(False)
                 msg_box.show()
             
