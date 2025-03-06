@@ -127,6 +127,13 @@ class SrtGenerationView(QWidget):
         self.whisper_sync = None  # WhisperX synchronizer instance
         self.temp_audio_files = []  # Track all temporary audio files for proper cleanup
         
+        # Variables for sequential processing
+        self.video_queue = []
+        self.total_videos = 0
+        self.processed_videos = 0
+        self.successful_videos = 0
+        self.current_video = None
+        
         # Initialize the UI
         self.init_ui()
         
@@ -493,247 +500,327 @@ class SrtGenerationView(QWidget):
             except Exception as e:
                 print(f"Error stopping worker thread: {str(e)}")
         
+        # Initialize sequential processing variables
+        self.video_queue = video_files.copy()
+        self.total_videos = len(video_files)
+        self.processed_videos = 0
+        self.successful_videos = 0
+        
         # Update status
-        self.status_label.setText("Starting transcription...")
+        self.status_label.setText(f"Starting transcription: 0/{self.total_videos} videos processed")
         QCoreApplication.processEvents()  # Force UI update
         
-        # Create a wrapper function to run the async method
-        async def run_generation():
-            return await self._generate_srt_async(video_files)
-        
-        # Start async operation with progress updates - pass the function itself, not the coroutine
-        self.worker_thread = run_async(
-            run_generation,
-            on_success=self._on_transcription_finished,
-            on_error=self._on_transcription_error
-        )
+        # Start processing the first video
+        self._process_next_video()
 
-    def _on_transcription_finished(self, result):
-        """Handle completed transcription"""
-        print("Transcription completed successfully")
-        
-        # Set progress bar to 100%
-        self.progress_bar.setValue(100)
-        QCoreApplication.processEvents()  # Force UI update
-        
-        # Clean up the worker thread reference
-        self.worker_thread = None
-        
-        # Ensure all temporary files are cleaned up
-        self._cleanup_temp_files()
-        
-        # Display success message after cleanup operations
-        if result and isinstance(result, str):
-            self.status_label.setText(result)
-            # Use a very short timer to show the message box to allow UI to update first
-            QTimer.singleShot(100, lambda: QMessageBox.information(self, "Transcription Complete", result))
-        else:
-            success_msg = "Transcription complete."
-            self.status_label.setText(success_msg)
-            # Use a very short timer to show the message box to allow UI to update first
-            QTimer.singleShot(100, lambda: QMessageBox.information(self, "Transcription Complete", success_msg))
-
-    def _on_transcription_error(self, error):
-        """Handle transcription error"""
-        print(f"Transcription error: {str(error)}")
-        
-        # Clean up the worker thread reference
-        self.worker_thread = None
-        
-        # Ensure all temporary files are cleaned up
-        self._cleanup_temp_files()
-        
-        # Display error message
-        error_msg = f"Error during transcription: {str(error)}"
-        self.status_label.setText(error_msg)
-        # Use a timer to show message box to prevent UI freezing
-        QTimer.singleShot(100, lambda: QMessageBox.critical(self, "Transcription Error", error_msg))
-
-    def _cleanup_temp_files(self):
-        """Clean up all temporary audio files"""
-        if not self.temp_audio_files:
-            return
+    def _process_next_video(self):
+        """Process the next video in the queue"""
+        try:
+            # Check if we have more videos to process
+            if not self.video_queue:
+                # All videos processed, complete the operation
+                self._on_all_videos_finished()
+                return
+                
+            # Get the next video
+            self.current_video = self.video_queue.pop(0)
             
-        print(f"Cleaning up {len(self.temp_audio_files)} temporary audio files...")
-        successful_deletions = 0
-        for audio_file in self.temp_audio_files[:]:  # Use a copy of the list for safe iteration
+            # Update UI
+            current_status = f"Processing video {self.processed_videos + 1}/{self.total_videos}: {os.path.basename(self.current_video)}"
+            self.status_label.setText(current_status)
+            
+            # Update progress bar to show overall completion
+            overall_progress = int((self.processed_videos / self.total_videos) * 100)
+            self.progress_bar.setValue(overall_progress)
+            QCoreApplication.processEvents()  # Force UI update
+            
+            # Create a wrapper function to run the async method for a single video
+            async def run_single_video():
+                return await self._process_single_video_async(self.current_video)
+            
+            # Start async operation for this video
+            self.worker_thread = run_async(
+                run_single_video,
+                on_success=self._on_single_video_complete,
+                on_error=self._on_single_video_error
+            )
+        except Exception as e:
+            print(f"Error starting video processing: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            # Try to continue with the next video
+            self.processed_videos += 1
+            
+            # Clean up in case of error
+            if hasattr(self, 'current_video'):
+                self.current_video = None
+            
+            if hasattr(self, 'worker_thread') and self.worker_thread:
+                try:
+                    self.worker_thread.stop()
+                except:
+                    pass
+                self.worker_thread = None
+            
+            # Try to continue with the next video if there are any left
+            if self.video_queue:
+                # Use a timer to allow some time for cleanup
+                QTimer.singleShot(100, self._process_next_video)
+            else:
+                # End of queue, finish the process
+                self._on_all_videos_finished()
+
+    def _on_single_video_complete(self, result):
+        """Handle completion of a single video"""
+        try:
+            # Update counters
+            self.processed_videos += 1
+            if result:  # If result is successful
+                self.successful_videos += 1
+            
+            # Clean up the worker thread reference with verification
+            if self.worker_thread:
+                try:
+                    # Ensure the thread is properly stopped
+                    if hasattr(self.worker_thread, 'is_running') and self.worker_thread.is_running:
+                        self.worker_thread.stop()
+                    self.worker_thread = None
+                except Exception as e:
+                    print(f"Error cleaning up worker thread: {str(e)}")
+                    # Continue despite error
+            
+            # Process the next video
+            self._process_next_video()
+        except Exception as e:
+            print(f"Error in video completion handler: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            # Try to continue processing the next video despite error
             try:
-                if os.path.exists(audio_file):
-                    print(f"Deleting temporary audio file: {audio_file}")
-                    os.remove(audio_file)
-                    successful_deletions += 1
-                self.temp_audio_files.remove(audio_file)  # Remove from list regardless of existence
-            except Exception as e:
-                print(f"Error deleting temporary audio file {audio_file}: {str(e)}")
-                # Continue with other files even if this one fails
+                self._process_next_video()
+            except Exception as next_error:
+                print(f"Error trying to process next video: {str(next_error)}")
+    
+    def _on_single_video_error(self, error):
+        """Handle error during processing of a single video"""
+        try:
+            print(f"Error processing video {self.current_video}: {str(error)}")
+            
+            # Update counters
+            self.processed_videos += 1
+            
+            # Clean up the worker thread reference with verification
+            if self.worker_thread:
+                try:
+                    # Ensure the thread is properly stopped
+                    if hasattr(self.worker_thread, 'is_running') and self.worker_thread.is_running:
+                        self.worker_thread.stop()
+                    self.worker_thread = None
+                except Exception as e:
+                    print(f"Error cleaning up worker thread after error: {str(e)}")
+                    # Continue despite error
+            
+            # Process the next video despite the error
+            self._process_next_video()
+        except Exception as e:
+            print(f"Error in error handler: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            # Try to continue processing the next video despite error in error handler
+            try:
+                self._process_next_video()
+            except Exception as next_error:
+                print(f"Error trying to process next video after error: {str(next_error)}")
+    
+    def _on_all_videos_finished(self):
+        """Handle completion of all videos"""
+        print("All transcriptions completed")
         
-        print(f"Successfully cleaned up {successful_deletions} temporary audio files")
-        # Reset the audio file references
-        self.temp_audio_files = []
-        self.current_audio_file = None
+        try:
+            # Set progress bar to 100%
+            self.progress_bar.setValue(100)
+            QCoreApplication.processEvents()  # Force UI update
+            
+            # Clean up any remaining temporary files
+            self._cleanup_temp_files()
+            
+            # Force garbage collection to help with memory
+            import gc
+            gc.collect()
+            
+            # Final status message
+            if self.successful_videos > 0:
+                success_msg = f"Successfully transcribed {self.successful_videos}/{self.total_videos} files."
+                self.status_label.setText(success_msg)
+                # Use a non-modal message box
+                msg_box = QMessageBox(QMessageBox.Information, "Transcription Complete", success_msg, 
+                                     QMessageBox.Ok, self)
+                msg_box.setModal(False)
+                msg_box.show()
+            else:
+                error_msg = "No files were transcribed. Check the API key and try again."
+                self.status_label.setText(error_msg)
+                # Use a non-modal message box
+                msg_box = QMessageBox(QMessageBox.Warning, "Transcription Failed", error_msg, 
+                                     QMessageBox.Ok, self)
+                msg_box.setModal(False)
+                msg_box.show()
+            
+            # Clean up references
+            self.worker_thread = None
+            self.current_video = None
+            
+            # Process any pending events before returning
+            QCoreApplication.processEvents()
+            
+        except Exception as e:
+            print(f"Error in completion phase: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            # Try to at least update the UI
+            try:
+                self.status_label.setText(f"Error during completion: {str(e)}")
+                QCoreApplication.processEvents()
+            except:
+                pass
+    
+    # Keep original handlers for backward compatibility with other parts of the code
+    def _on_transcription_finished(self, result):
+        """Original handler for completed transcription - kept for backward compatibility"""
+        print("Original transcription handler called - no additional actions needed")
+        # Do nothing else to avoid duplicate cleanup
+    
+    def _on_transcription_error(self, error):
+        """Original handler for transcription error - kept for backward compatibility"""
+        print(f"Original transcription error handler called: {str(error)}")
+        # Do nothing else to avoid duplicate cleanup
+
+    async def _process_single_video_async(self, video_file):
+        """Process a single video file asynchronously"""
+        try:
+            # Calculate progress increment for this video (0-100 within its portion of the total)
+            base_progress = int((self.processed_videos / self.total_videos) * 100)
+            video_progress_increment = 100 / self.total_videos
+            
+            # Update status
+            current_status = f"Processing video {self.processed_videos + 1}/{self.total_videos}: {os.path.basename(video_file)}"
+            
+            # Extract audio from video
+            step_progress = base_progress + (video_progress_increment * 0.05)  # 5% of video progress
+            self.progress_bar.setValue(int(step_progress))
+            self.status_label.setText(f"{current_status} - Extracting audio...")
+            QCoreApplication.processEvents()  # Force UI update
+            
+            audio_path = await self._extract_audio(video_file)
+            if not audio_path:
+                print(f"Failed to extract audio from {video_file}")
+                return False
+            
+            # Transcribe audio using assemblyai
+            step_progress = base_progress + (video_progress_increment * 0.25)  # 25% of video progress
+            self.progress_bar.setValue(int(step_progress))
+            self.status_label.setText(f"{current_status} - Transcribing...")
+            QCoreApplication.processEvents()  # Force UI update
+            
+            # Create transcript
+            transcript = await self._create_transcript(audio_path)
+            if not transcript:
+                print(f"Failed to create transcript for {video_file}")
+                return False
+            
+            # Generate SRT file
+            step_progress = base_progress + (video_progress_increment * 0.80)  # 80% of video progress
+            self.progress_bar.setValue(int(step_progress))
+            self.status_label.setText(f"{current_status} - Formatting subtitles...")
+            QCoreApplication.processEvents()  # Force UI update
+            
+            srt_path = self._get_srt_path(video_file)
+            srt_content = self._format_srt(transcript, self.current_audio_duration)
+            
+            # Save SRT file
+            with open(srt_path, 'w', encoding='utf-8') as f:
+                f.write(srt_content)
+            
+            print(f"Saved SRT file: {srt_path}")
+            
+            # Set progress for this file complete
+            step_progress = base_progress + video_progress_increment
+            self.progress_bar.setValue(int(step_progress))
+            QCoreApplication.processEvents()  # Force UI update
+            
+            # Clean up the audio file after processing this video
+            try:
+                # Ensure any external resources from this video's processing are released
+                if audio_path and audio_path in self.temp_audio_files and os.path.exists(audio_path):
+                    os.remove(audio_path)
+                    self.temp_audio_files.remove(audio_path)
+                    print(f"Cleaned up temporary audio file: {audio_path}")
+                
+                # Reset any video-specific resources
+                self.current_audio_file = None
+                
+                # Force processing any pending events
+                QCoreApplication.processEvents()
+                
+                # Optional: help garbage collector
+                import gc
+                gc.collect()
+            except Exception as e:
+                print(f"Error during single video cleanup: {str(e)}")
+                # Continue despite cleanup error
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error processing {video_file}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            # Try to clean up any resources before returning
+            try:
+                if 'audio_path' in locals() and audio_path and os.path.exists(audio_path):
+                    try:
+                        os.remove(audio_path)
+                        if audio_path in self.temp_audio_files:
+                            self.temp_audio_files.remove(audio_path)
+                        print(f"Cleaned up temporary audio file after error: {audio_path}")
+                    except:
+                        pass
+            except:
+                pass
+                
+            return False
 
     async def _generate_srt_async(self, video_files):
-        """Asynchronously generate SRTs from video files"""
+        """Legacy method for backward compatibility - now using sequential processing instead"""
+        # This method is kept for backward compatibility
+        # Now the processing is done one video at a time via _process_single_video_async
         try:
             total_files = len(video_files)
             successful_files = 0
             
+            # Process one video at a time
             for i, video_file in enumerate(video_files):
-                # Update progress bar at the start of processing each file
-                progress_percent = int((i / total_files) * 100)
-                self.progress_bar.setValue(progress_percent)
-                QCoreApplication.processEvents()  # Ensure UI updates
-                
-                current_status = f"Processing video {i+1}/{total_files}: {os.path.basename(video_file)}"
-                print(current_status)
-                self.status_label.setText(current_status)
-                QCoreApplication.processEvents()  # Ensure UI updates
-                
-                try:
-                    # Extract audio from video
-                    self.progress_bar.setValue(int(progress_percent + (5/total_files)))
-                    QCoreApplication.processEvents()  # Force UI update
-                    
-                    audio_path = await self._extract_audio(video_file)
-                    if not audio_path:
-                        print(f"Failed to extract audio from {video_file}")
-                        continue
-                    
-                    # Transcribe audio using assemblyai
-                    self.progress_bar.setValue(int(progress_percent + (25/total_files)))
-                    QCoreApplication.processEvents()  # Force UI update
-                    
-                    status_msg = f"{current_status} - Transcribing..."
-                    print(status_msg)
-                    self.status_label.setText(status_msg)
-                    QCoreApplication.processEvents()  # Force UI update
-                    
-                    # Create transcript
-                    transcript = await self._create_transcript(audio_path)
-                    if not transcript:
-                        print(f"Failed to create transcript for {video_file}")
-                        continue
-                    
-                    # Generate SRT file
-                    self.progress_bar.setValue(int(progress_percent + (80/total_files)))
-                    QCoreApplication.processEvents()  # Force UI update
-                    
-                    status_msg = f"{current_status} - Formatting subtitles..."
-                    self.status_label.setText(status_msg)
-                    QCoreApplication.processEvents()  # Force UI update
-                    
-                    srt_path = self._get_srt_path(video_file)
-                    srt_content = self._format_srt(transcript, self.current_audio_duration)
-                    
-                    # Save SRT file
-                    with open(srt_path, 'w', encoding='utf-8') as f:
-                        f.write(srt_content)
-                    
-                    print(f"Saved SRT file: {srt_path}")
+                result = await self._process_single_video_async(video_file)
+                if result:
                     successful_files += 1
-                    
-                    # Set progress for this file complete
-                    self.progress_bar.setValue(int(progress_percent + (100/total_files)))
-                    QCoreApplication.processEvents()  # Force UI update
-                except Exception as e:
-                    print(f"Error processing {video_file}: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-                    # Continue with next file
-            
-            # Set progress to 100% when complete
-            self.progress_bar.setValue(100)
-            QCoreApplication.processEvents()  # Force UI update
             
             # Final status message
             if successful_files > 0:
                 success_msg = f"Successfully transcribed {successful_files}/{total_files} files."
-                self.status_label.setText(success_msg)
                 return success_msg
             else:
                 error_msg = "No files were transcribed. Check the API key and try again."
-                self.status_label.setText(error_msg)
                 return error_msg
         except Exception as e:
             print(f"Error in _generate_srt_async: {str(e)}")
             import traceback
             traceback.print_exc()
             raise e
-
-    async def _extract_audio(self, video_path):
-        """Extract audio from video file."""
-        try:
-            print(f"Extracting audio from {video_path}")
-            self.status_label.setText(f"Extracting audio from {os.path.basename(video_path)}...")
-            QCoreApplication.processEvents()  # Force UI update
-            
-            # Get output path for the audio file
-            output_dir = os.path.dirname(video_path)
-            output_filename = os.path.splitext(os.path.basename(video_path))[0] + '.wav'
-            output_path = os.path.join(output_dir, output_filename)
-            
-            # Optimized ffmpeg command to extract audio - use higher bitrate for better quality
-            ffmpeg_cmd = [
-                'ffmpeg', '-i', video_path, 
-                '-vn',  # No video
-                '-acodec', 'pcm_s16le',  # Convert to WAV
-                '-ar', '16000',  # 16kHz sample rate (optimal for speech recognition)
-                '-ac', '1',  # Mono
-                '-y',  # Overwrite output file if it exists
-                '-loglevel', 'error',  # Reduce logging output for performance
-                output_path
-            ]
-            
-            # Execute ffmpeg
-            print(f"Running ffmpeg: {' '.join(ffmpeg_cmd)}")
-            process = await asyncio.create_subprocess_exec(
-                *ffmpeg_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            # Wait for the process to complete
-            stdout, stderr = await process.communicate()
-            
-            # Check if process was successful
-            if process.returncode != 0:
-                error_msg = stderr.decode() if stderr else "Unknown ffmpeg error"
-                print(f"Error extracting audio: {error_msg}")
-                self.status_label.setText(f"Error extracting audio: {error_msg}")
-                QCoreApplication.processEvents()  # Force UI update
-                return None
-                
-            # Get the duration of the audio file
-            if os.path.exists(output_path):
-                try:
-                    with wave.open(output_path, 'rb') as wf:
-                        # Calculate duration from wave file properties
-                        frames = wf.getnframes()
-                        rate = wf.getframerate()
-                        duration = frames / float(rate)
-                        print(f"Extracted audio duration: {duration:.2f} seconds")
-                        
-                        # Store the duration for later use in timestamp validation
-                        self.current_audio_duration = duration
-                except Exception as e:
-                    print(f"Error reading audio duration: {str(e)}")
-                    self.current_audio_duration = None
-            
-                print(f"Audio extracted successfully to {output_path}")
-                # Add to temp files list for later cleanup
-                if output_path not in self.temp_audio_files:
-                    self.temp_audio_files.append(output_path)
-                return output_path
-            else:
-                print(f"Output audio file not found: {output_path}")
-                return None
-        except Exception as e:
-            print(f"Error during audio extraction: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            self.status_label.setText(f"Error during audio extraction: {str(e)}")
-            QCoreApplication.processEvents()  # Force UI update
-            return None
 
     def closeEvent(self, event):
         """Handle cleanup when the widget is closed"""
@@ -1140,6 +1227,134 @@ class SrtGenerationView(QWidget):
             import traceback
             traceback.print_exc()
             raise
+
+    def _cleanup_temp_files(self):
+        """Clean up all temporary resources"""
+        if not self.temp_audio_files and not self.worker_thread:
+            return
+            
+        print("Starting comprehensive resource cleanup...")
+        successful_deletions = 0
+        
+        try:
+            # First, ensure no worker thread is active
+            if self.worker_thread:
+                try:
+                    print("Stopping worker thread before cleanup")
+                    self.worker_thread.stop()
+                    # Give a moment for thread cleanup
+                    QCoreApplication.processEvents()
+                    # Set to None to help garbage collection
+                    self.worker_thread = None
+                except Exception as e:
+                    print(f"Error stopping worker thread: {str(e)}")
+            
+            # Clean up temporary audio files
+            for audio_file in self.temp_audio_files[:]:  # Use a copy of the list for safe iteration
+                try:
+                    if os.path.exists(audio_file):
+                        print(f"Deleting temporary audio file: {audio_file}")
+                        os.remove(audio_file)
+                        successful_deletions += 1
+                    self.temp_audio_files.remove(audio_file)  # Remove from list regardless of existence
+                except Exception as e:
+                    print(f"Error deleting temporary audio file {audio_file}: {str(e)}")
+                    # Continue with other files even if this one fails
+            
+            # Process any pending events
+            QCoreApplication.processEvents()
+            
+            # Help garbage collector
+            import gc
+            gc.collect()
+            
+            print(f"Successfully cleaned up {successful_deletions} temporary audio files")
+        except Exception as e:
+            print(f"Error during resource cleanup: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # Reset all resource references
+            self.temp_audio_files = []
+            self.current_audio_file = None
+            self.current_audio_duration = None
+            # Process any pending events
+            QCoreApplication.processEvents()
+
+    async def _extract_audio(self, video_path):
+        """Extract audio from video file."""
+        try:
+            print(f"Extracting audio from {video_path}")
+            self.status_label.setText(f"Extracting audio from {os.path.basename(video_path)}...")
+            QCoreApplication.processEvents()  # Force UI update
+            
+            # Get output path for the audio file
+            output_dir = os.path.dirname(video_path)
+            output_filename = os.path.splitext(os.path.basename(video_path))[0] + '.wav'
+            output_path = os.path.join(output_dir, output_filename)
+            
+            # Optimized ffmpeg command to extract audio - use higher bitrate for better quality
+            ffmpeg_cmd = [
+                'ffmpeg', '-i', video_path, 
+                '-vn',  # No video
+                '-acodec', 'pcm_s16le',  # Convert to WAV
+                '-ar', '16000',  # 16kHz sample rate (optimal for speech recognition)
+                '-ac', '1',  # Mono
+                '-y',  # Overwrite output file if it exists
+                '-loglevel', 'error',  # Reduce logging output for performance
+                output_path
+            ]
+            
+            # Execute ffmpeg
+            print(f"Running ffmpeg: {' '.join(ffmpeg_cmd)}")
+            process = await asyncio.create_subprocess_exec(
+                *ffmpeg_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            # Wait for the process to complete
+            stdout, stderr = await process.communicate()
+            
+            # Check if process was successful
+            if process.returncode != 0:
+                error_msg = stderr.decode() if stderr else "Unknown ffmpeg error"
+                print(f"Error extracting audio: {error_msg}")
+                self.status_label.setText(f"Error extracting audio: {error_msg}")
+                QCoreApplication.processEvents()  # Force UI update
+                return None
+                
+            # Get the duration of the audio file
+            if os.path.exists(output_path):
+                try:
+                    with wave.open(output_path, 'rb') as wf:
+                        # Calculate duration from wave file properties
+                        frames = wf.getnframes()
+                        rate = wf.getframerate()
+                        duration = frames / float(rate)
+                        print(f"Extracted audio duration: {duration:.2f} seconds")
+                        
+                        # Store the duration for later use in timestamp validation
+                        self.current_audio_duration = duration
+                except Exception as e:
+                    print(f"Error reading audio duration: {str(e)}")
+                    self.current_audio_duration = None
+            
+                print(f"Audio extracted successfully to {output_path}")
+                # Add to temp files list for later cleanup
+                if output_path not in self.temp_audio_files:
+                    self.temp_audio_files.append(output_path)
+                return output_path
+            else:
+                print(f"Output audio file not found: {output_path}")
+                return None
+        except Exception as e:
+            print(f"Error during audio extraction: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            self.status_label.setText(f"Error during audio extraction: {str(e)}")
+            QCoreApplication.processEvents()  # Force UI update
+            return None
 
 class SimpleUtterance:
     """Simple class to represent an utterance with text and timing"""
