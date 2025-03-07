@@ -1,11 +1,11 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                          QListWidget, QMessageBox, QFileDialog, QLineEdit, QStyle, QComboBox,
-                         QProgressBar, QCheckBox)
+                         QProgressBar, QCheckBox, QFrame)
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer  # type: ignore
 import os
 from typing import List, Optional, Tuple, Dict, Any
 from .video_drop_area import VideoDropArea
-from PyQt6.QtGui import QIcon  # type: ignore
+from PyQt6.QtGui import QIcon, QColor  # type: ignore
 import assemblyai as aai  # type: ignore
 from ..core.async_utils import run_async
 from ..core.api_provider import ApiProviderFactory
@@ -319,7 +319,9 @@ class SrtGenerationView(QWidget):
         if all_valid_files:
             self.video_files.extend(all_valid_files)
             self._update_file_list()
-            self.status_label.setText(f"{len(all_valid_files)} video files found and added")
+            
+            # Show success message using inlined toast
+            self._show_inline_toast(f"{len(all_valid_files)} video files added")
         else:
             QMessageBox.warning(self, "No Videos Found", "No valid video files were found in the dropped items.")
 
@@ -356,7 +358,9 @@ class SrtGenerationView(QWidget):
             if valid_files:
                 self.video_files.extend(valid_files)
                 self._update_file_list()
-                self.status_label.setText(f"{len(valid_files)} video files found and added")
+                
+                # Show success message using inlined toast
+                self._show_inline_toast(f"{len(valid_files)} video files added")
             else:
                 QMessageBox.warning(self, "No Videos Found", "No valid video files were found in the selected folder.")
 
@@ -1434,6 +1438,168 @@ class SrtGenerationView(QWidget):
             self.status_label.setText(f"Error during audio extraction: {str(e)}")
             QCoreApplication.processEvents()  # Force UI update
             return None
+
+    def _show_inline_toast(self, message, duration_ms=5000):
+        """Show a simple toast message in the top-right corner with a close button"""
+        # Create toast frame
+        toast = QFrame(self)
+        toast.setStyleSheet("""
+            QFrame {
+                background-color: rgba(46, 125, 50, 178);
+                color: white;
+                border-radius: 4px 4px 0px 0px; /* Round only the top corners */
+                border: none;
+            }
+            QProgressBar {
+                background: transparent;
+                border: none;
+                height: 2px;
+                max-height: 2px;
+                min-height: 2px;
+                margin: 0px;
+                padding: 0px;
+                border-radius: 0px;
+            }
+            QProgressBar::chunk {
+                background-color: rgba(200, 255, 200, 255);
+            }
+            QLabel {
+                background-color: transparent;
+                color: white;
+                font-weight: bold;
+            }
+            QPushButton {
+                background-color: transparent;
+                color: white;
+                border: none;
+                font-weight: bold;
+                font-size: 14px;
+                min-width: 22px;
+                min-height: 22px;
+                max-width: 22px;
+                max-height: 22px;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 255, 255, 50);
+                border-radius: 11px;
+            }
+        """)
+        
+        # Create main layout
+        main_layout = QVBoxLayout(toast)
+        main_layout.setContentsMargins(0, 0, 0, 0)  # No margins at all
+        main_layout.setSpacing(0)  # No spacing between elements
+        
+        # Create content widget
+        content_widget = QWidget()
+        content_layout = QHBoxLayout(content_widget)  # Use horizontal layout for content
+        content_layout.setContentsMargins(16, 8, 16, 8)  # Left, top, right, bottom padding
+        
+        # Add message label
+        label = QLabel(message)
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignmentFlag.AlignVCenter)  # Center text vertically
+        content_layout.addWidget(label, 1)  # Add stretch factor to push close button to right
+        
+        # Create a flag to track if toast is manually closed
+        toast.is_closing = False
+        
+        # Function to safely close the toast
+        def close_toast():
+            # Set the flag to prevent auto-close timer from triggering
+            toast.is_closing = True
+            # Stop the progress timer
+            if hasattr(toast, 'timer') and toast.timer:
+                toast.timer.stop()
+            # Delete the toast
+            toast.deleteLater()
+        
+        # Add close button
+        close_button = QPushButton("✕")  # Unicode X character
+        close_button.setFixedSize(22, 22)  # Set fixed size
+        close_button.setToolTip("Close")
+        close_button.setCursor(Qt.CursorShape.PointingHandCursor)  # Change cursor on hover
+        content_layout.addWidget(close_button, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        content_layout.setSpacing(10)  # Add spacing between label and button
+        
+        # Connect close button to the safe close function
+        close_button.clicked.connect(close_toast)
+        
+        # Add content widget to main layout
+        main_layout.addWidget(content_widget)
+        
+        # Add progress bar at the bottom
+        progress = QProgressBar()
+        progress.setMaximum(1000)  # Increase resolution for smoother animation
+        progress.setValue(1000)
+        progress.setTextVisible(False)
+        progress.setFixedHeight(2)  # Force height to be exactly 2px
+        progress.setContentsMargins(0, 0, 0, 0)  # No margins for the progress bar
+        main_layout.addWidget(progress, 0, Qt.AlignmentFlag.AlignBottom)  # Align at bottom
+        
+        # Set minimum width to ensure it's more rectangular
+        toast.setMinimumWidth(300)
+        
+        # Show the toast
+        toast.show()
+        toast.adjustSize()
+        
+        # Position in top-right corner
+        toast.move(self.width() - toast.width() - 20, 20)
+        toast.raise_()
+        
+        # Setup animation parameters
+        update_interval = 16  # Update every ~16ms (60fps) for smooth animation
+        remaining_time = duration_ms
+        decrements_per_second = 1000 / update_interval  # Number of updates per second
+        decrement_per_step = 1000 / (duration_ms / update_interval)  # Amount to decrement per step
+        
+        # Timer for progress bar
+        timer = QTimer(toast)
+        
+        # Using a property animation for smoother progress
+        progress_value = 1000
+        
+        def update_progress():
+            nonlocal progress_value, remaining_time
+            
+            # Calculate smooth decrement
+            remaining_time -= update_interval
+            progress_value -= decrement_per_step
+            
+            # Apply with bounds checking
+            if progress_value < 0:
+                progress_value = 0
+                
+            progress.setValue(int(progress_value))
+            
+            if remaining_time <= 0 or progress_value <= 0:
+                timer.stop()
+        
+        timer.timeout.connect(update_progress)
+        timer.start(update_interval)
+        
+        # Store timer reference as property of toast to prevent garbage collection
+        toast.timer = timer
+        
+        # Auto-close timer with safe closure check
+        def auto_close():
+            # Only close if not already being closed
+            if not toast.is_closing and not toast.isHidden():
+                close_toast()
+        
+        # Use QTimer for auto-close
+        auto_close_timer = QTimer(toast)
+        auto_close_timer.setSingleShot(True)
+        auto_close_timer.timeout.connect(auto_close)
+        auto_close_timer.start(duration_ms)
+        
+        # Store the auto-close timer reference
+        toast.auto_close_timer = auto_close_timer
+        
+        return toast
 
 class SimpleUtterance:
     """Simple class to represent an utterance with text and timing"""
