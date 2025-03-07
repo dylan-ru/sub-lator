@@ -296,30 +296,32 @@ class SrtGenerationView(QWidget):
             return False, f"Error checking file: {str(e)}"
 
     def _handle_dropped_files(self, files: List[str]):
-        """Handle dropped video files."""
-        valid_files = []
-        invalid_files = []
+        """Handle dropped video files and folders."""
+        all_valid_files = []
+        all_invalid_files = []  # Keep for debugging but don't show to user
         
-        # Validate each file
+        # Process each dropped item
         for file_path in files:
-            is_valid, message = self._validate_video_file(file_path)
-            if is_valid:
-                valid_files.append(file_path)
+            if os.path.isdir(file_path):
+                # If it's a directory, scan it for videos
+                valid_files, invalid_files = self._scan_folder_for_videos(file_path)
+                all_valid_files.extend(valid_files)
+                all_invalid_files.extend(invalid_files)
             else:
-                invalid_files.append(f"{os.path.basename(file_path)}: {message}")
-                
-        # Add valid files to the list
-        if valid_files:
-            self.video_files.extend(valid_files)
-        self._update_file_list()
-            
-        # Show message about invalid files
-        if invalid_files:
-            invalid_msg = "The following files could not be added:\n\n" + "\n".join(invalid_files)
-            QMessageBox.warning(self, "Invalid Files", invalid_msg)
+                # If it's a file, validate it directly
+                is_valid, message = self._validate_video_file(file_path)
+                if is_valid:
+                    all_valid_files.append(file_path)
+                else:
+                    all_invalid_files.append(f"{os.path.basename(file_path)}: {message}")
         
-        # Update UI
-        self.status_label.setText(f"{len(self.video_files)} video files selected")
+        # Add valid files to the list
+        if all_valid_files:
+            self.video_files.extend(all_valid_files)
+            self._update_file_list()
+            self.status_label.setText(f"{len(all_valid_files)} video files found and added")
+        else:
+            QMessageBox.warning(self, "No Videos Found", "No valid video files were found in the dropped items.")
 
     def _update_file_list(self):
         """Update the list widget with current video files."""
@@ -327,12 +329,36 @@ class SrtGenerationView(QWidget):
         for file_path in self.video_files:
             self.file_list.addItem(os.path.basename(file_path))
 
+    def _scan_folder_for_videos(self, folder_path):
+        """Recursively scan a folder for valid video files."""
+        valid_files = []
+        invalid_files = []
+        
+        for root, _, files in os.walk(folder_path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                is_valid, message = self._validate_video_file(file_path)
+                if is_valid:
+                    valid_files.append(file_path)
+                else:
+                    invalid_files.append(f"{os.path.basename(file_path)}: {message}")
+        
+        return valid_files, invalid_files
+
     def _open_source_folder(self):
         """Open folder dialog to select video files."""
         folder_path = QFileDialog.getExistingDirectory(self, "Select Folder with Video Files")
         if folder_path:
-            # Simulate dropping the folder
-            self._handle_dropped_files([folder_path])
+            # Scan the folder for video files
+            valid_files, invalid_files = self._scan_folder_for_videos(folder_path)
+            
+            # Add valid files to the list
+            if valid_files:
+                self.video_files.extend(valid_files)
+                self._update_file_list()
+                self.status_label.setText(f"{len(valid_files)} video files found and added")
+            else:
+                QMessageBox.warning(self, "No Videos Found", "No valid video files were found in the selected folder.")
 
     def _remove_selected_file(self):
         """Remove the selected file from the list."""
