@@ -117,15 +117,20 @@ class SrtGenerationView(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.parent = parent
-        self.api_key_manager = ApiKeyManager()
-        self.video_files = []
-        self.api_key = None
-        self.current_audio_file = None
-        self.current_audio_duration = None  # Store the detected duration of current audio
-        self.worker_thread = None  # Single worker thread variable for consistency
-        self.whisper_sync = None  # WhisperX synchronizer instance
-        self.temp_audio_files = []  # Track all temporary audio files for proper cleanup
+        self.setObjectName("SrtGenerationView")
+        self.parent = parent  # Store parent reference
+        
+        # Initialize variables
+        self.video_files = []  # List of video files to be processed
+        self.current_video_index = 0  # Index of the current video being processed
+        self.worker_thread = None  # Worker thread for transcription
+        self.cancel_requested = False  # Flag to cancel processing
+        self.whisper_sync = None  # WhisperX synchronizer
+        self.temp_audio_files = []  # Temporary audio files to clean up
+        self.current_audio_file = None  # Current audio file being processed
+        self.current_audio_duration = None  # Duration of the current audio in seconds
+        self.dark_mode_active = False  # Dark mode state
+        self.api_key = None  # API key
         
         # Variables for sequential processing
         self.video_queue = []
@@ -134,11 +139,17 @@ class SrtGenerationView(QWidget):
         self.successful_videos = 0
         self.current_video = None
         
-        # Initialize the UI
+        # API key manager
+        self.api_key_manager = ApiKeyManager()
+        
+        # Set up the user interface
         self.init_ui()
         
         # Try to load API key on startup
         self._load_api_key_from_manager()
+        
+        # Resize the window slightly to trigger layout adjustments
+        QTimer.singleShot(100, lambda: self.resize(self.width()+1, self.height()))
 
     def _load_api_key_from_manager(self):
         """Load the stored API key from the manager into the active property"""
@@ -1421,7 +1432,6 @@ class SrtGenerationView(QWidget):
                         self.current_audio_duration = duration
                 except Exception as e:
                     print(f"Error reading audio duration: {str(e)}")
-                    self.current_audio_duration = None
             
                 print(f"Audio extracted successfully to {output_path}")
                 # Add to temp files list for later cleanup
@@ -1600,6 +1610,130 @@ class SrtGenerationView(QWidget):
         toast.auto_close_timer = auto_close_timer
         
         return toast
+
+    def set_dark_mode(self, enabled: bool):
+        """Set dark mode for the SRT generation view"""
+        self.dark_mode_active = enabled
+        
+        # Apply dark mode to the drop area
+        if hasattr(self, 'drop_area'):
+            self.drop_area.set_dark_mode(enabled)
+            
+        # Apply dark mode to the file list and other components
+        if enabled:
+            self.setStyleSheet("""
+                QWidget#SrtGenerationView {
+                    background-color: #121212;
+                    color: #e0e0e0;
+                }
+                QListWidget {
+                    background-color: #1e1e1e;
+                    color: #e0e0e0;
+                    border: 1px solid #3d3d3d;
+                }
+                QPushButton {
+                    background-color: #2d2d2d;
+                    color: #f0f0f0;
+                    border: 1px solid #3d3d3d;
+                    padding: 5px;
+                    border-radius: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #3d3d3d;
+                }
+                QLineEdit, QTextEdit, QPlainTextEdit, QLabel {
+                    background-color: #1e1e1e;
+                    color: #e0e0e0;
+                    border: 1px solid #3d3d3d;
+                }
+                QComboBox {
+                    background-color: #1e1e1e;
+                    color: #e0e0e0;
+                    border: 1px solid #3d3d3d;
+                    border-radius: 5px;
+                    padding: 8px 25px 8px 8px;
+                }
+                QComboBox:hover {
+                    background-color: #3d3d3d;
+                }
+                QComboBox::drop-down {
+                    border: none;
+                    width: 20px;
+                    border-radius: 5px;
+                    background-color: transparent;
+                }
+                QComboBox::down-arrow {
+                    image: url(src/icons/down_arrow_white.svg);
+                    width: 12px;
+                    height: 12px;
+                }
+                QComboBox QAbstractItemView {
+                    background-color: #2d2d2d;
+                    color: #f0f0f0;
+                    selection-background-color: #3d3d3d;
+                    selection-color: #ffffff;
+                    border: 1px solid #3d3d3d;
+                    border-radius: 5px;
+                }
+            """)
+        else:
+            # Light mode styling
+            self.setStyleSheet("""
+                QPushButton { 
+                    border-radius: 5px;
+                    padding: 5px;
+                    border: 1px solid #ccc;
+                    background-color: #f8f9fa;
+                }
+                QPushButton:hover {
+                    background-color: #e9ecef;
+                }
+                QListWidget {
+                    border: 1px solid #ddd;
+                    border-radius: 5px;
+                    background-color: white;
+                }
+                QLineEdit, QTextEdit, QPlainTextEdit {
+                    border: 1px solid #ccc;
+                    border-radius: 5px;
+                    padding: 5px;
+                    background-color: white;
+                }
+                QComboBox {
+                    border-radius: 5px;
+                    padding: 8px 25px 8px 8px;
+                    border: 1px solid #ccc;
+                    min-width: 6em;
+                    background-color: white;
+                }
+                QComboBox:hover {
+                    background-color: #f0f0f0;
+                }
+                QComboBox::drop-down {
+                    border: none;
+                    width: 20px;
+                    border-radius: 5px;
+                }
+                QComboBox::down-arrow {
+                    image: url(src/icons/down_arrow_dark.svg);
+                    width: 12px;
+                    height: 12px;
+                }
+                QComboBox QAbstractItemView {
+                    border: 1px solid #ccc;
+                    border-radius: 5px;
+                    selection-background-color: #e0e0e0;
+                }
+                QProgressBar {
+                    border: 1px solid #ccc;
+                    border-radius: 3px;
+                    text-align: center;
+                }
+                QProgressBar::chunk {
+                    background-color: #4CAF50;
+                    width: 10px;
+                }
+            """)
 
 class SimpleUtterance:
     """Simple class to represent an utterance with text and timing"""

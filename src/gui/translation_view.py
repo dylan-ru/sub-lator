@@ -101,6 +101,9 @@ class TranslationView(QWidget):
         self._update_key_list()
         
         self.dark_mode_active = False
+        
+        # Callback for dark mode toggle - will be set by MainWindow
+        self.dark_mode_toggled = None
 
     def closeEvent(self, event):
         """Handle cleanup when the widget is closed."""
@@ -762,6 +765,10 @@ class TranslationView(QWidget):
             self.dark_mode_btn.setText("Dark Mode: OFF")
             self.dark_mode_btn.setIcon(self.moon_icon)
             self.open_source_btn.setFixedSize(QSize(self.default_open_source_btn_size.width() + 5, self.default_open_source_btn_size.height()))
+        
+        # Notify MainWindow about dark mode change
+        if self.dark_mode_toggled:
+            self.dark_mode_toggled(self.dark_mode_active)
 
     def _import_api_keys(self):
         """Handle the import of API keys from a zip file."""
