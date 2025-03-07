@@ -1173,6 +1173,12 @@ class SrtGenerationView(QWidget):
             aai.settings.api_key = self.api_key
             print(f"Using API key: {self.api_key[:4]}...{self.api_key[-4:]} (length: {len(self.api_key)})")
             
+            # Create transcription config with language detection
+            config = aai.TranscriptionConfig(
+                language_detection=True,  # Enable automatic language detection
+                language_confidence_threshold=0.4  # Set minimum confidence threshold
+            )
+            
             # Create a transcriber
             transcriber = aai.Transcriber()
             
@@ -1181,13 +1187,19 @@ class SrtGenerationView(QWidget):
             # Use run_async_operation to run transcribe in a background thread
             # The transcribe method handles both upload and transcription in one call
             transcript = await self._run_async_operation(
-                lambda: transcriber.transcribe(audio_path)
+                lambda: transcriber.transcribe(audio_path, config)
             )
             
             # Check if we got a valid transcript
             if transcript is None:
                 print("Transcription failed - no transcript returned")
                 return None
+                
+            # Log language detection results if available
+            if hasattr(transcript, 'language_code'):
+                print(f"Detected language: {transcript.language_code}")
+                if hasattr(transcript, 'language_confidence'):
+                    print(f"Language detection confidence: {transcript.language_confidence}")
                 
             # Debug: Log the transcript structure to understand it
             print(f"Transcript type: {type(transcript)}")
