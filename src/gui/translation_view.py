@@ -51,59 +51,28 @@ class TranslationView(QWidget):
         self.update_timer.timeout.connect(self._update_key_statuses)
         self.update_timer.start(1000)
         self.files = []
-        self.store_at_original = False
+        self.store_at_original = True  # Set to True by default
         self.output_dir = None
         self.current_worker: Optional[AsyncWorker] = None
-
+        
         # Connect signals to slots
         self.update_progress.connect(self._update_progress_bar)
         self.update_status.connect(self._update_status_label)
         
-        # Set default button style
-        self.setStyleSheet("""
-            QPushButton { 
-                border-radius: 5px;
-                padding: 5px;
-                border: 1px solid #ccc;
-            }
-            QPushButton:hover {
-                background-color: rgb(140, 140, 140);
-            }
-            QComboBox {
-                border-radius: 5px;
-                padding: 8px 25px 8px 8px;
-                border: 1px solid #ccc;
-                min-width: 6em;
-            }
-            QComboBox:hover {
-                background-color: rgb(102, 102, 102);
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 20px;
-                border-radius: 5px;
-            }
-            QComboBox::down-arrow {
-                image: url(src/icons/down_arrow_dark.svg);
-                width: 12px;
-                height: 12px;
-            }
-            QComboBox QAbstractItemView {
-                border: 1px solid #ccc;
-                border-radius: 5px;
-                selection-background-color: #e0e0e0;
-            }
-        """)
-        
+        # Initialize UI
         self._init_ui()
         
         # Update the API key list immediately after UI initialization
         self._update_key_list()
         
-        self.dark_mode_active = False
+        # Set initial dark mode state
+        self.dark_mode_active = False  # Set to opposite of desired state (dark mode ON)
         
         # Callback for dark mode toggle - will be set by MainWindow
         self.dark_mode_toggled = None
+        
+        # Apply initial dark mode styling by toggling from light to dark
+        self.toggle_dark_mode()  # This will set dark_mode_active to True
 
     def closeEvent(self, event):
         """Handle cleanup when the widget is closed."""
@@ -272,6 +241,7 @@ class TranslationView(QWidget):
 
         # Store at original location checkbox
         self.store_original_cb = QCheckBox("Store files at the original location")
+        self.store_original_cb.setChecked(True)  # Set checked by default
         self.store_original_cb.stateChanged.connect(self._toggle_output_directory)
         layout.addWidget(self.store_original_cb)
 
@@ -703,21 +673,40 @@ class TranslationView(QWidget):
 
     def toggle_dark_mode(self):
         if not self.dark_mode_active:
+            # Define the dark mode stylesheet
             dark_style = """
             QWidget { background-color: #121212; color: #e0e0e0; }
             QPushButton { 
-                background-color: #2d2d2d; 
+                background-color: #2d2d2d !important; 
                 color: #f0f0f0;
                 border: 1px solid #3d3d3d;
                 padding: 5px;
                 border-radius: 5px;
             }
-            QPushButton:hover {
-                background-color: darkgray;
+            QPushButton:hover { 
+                background-color: #494949 !important;
             }
-            QLineEdit, QTextEdit, QPlainTextEdit, QListWidget, QLabel { 
+            QPushButton:pressed { 
+                background-color: #555555 !important;
+            }
+            QLineEdit { 
                 background-color: #1e1e1e; 
-                color: #e0e0e0; 
+                color: #e0e0e0;
+                border: 1px solid #3d3d3d;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QTextEdit, QPlainTextEdit { 
+                background-color: #1e1e1e; 
+                color: #e0e0e0;
+                border: 1px solid #3d3d3d;
+            }
+            QListWidget, QLabel { 
+                background-color: #1e1e1e; 
+                color: #e0e0e0;
+                border: 1px solid #3d3d3d;
+                border-radius: 5px;
+                padding: 2px;
             }
             QComboBox {
                 background-color: rgb(115, 115, 115);
@@ -728,7 +717,7 @@ class TranslationView(QWidget):
                 min-width: 6em;
             }
             QComboBox:hover {
-                background-color: rgb(128, 159, 255);
+                background-color: rgb(73, 73, 73);
             }
             QComboBox::drop-down {
                 border: none;
@@ -737,7 +726,7 @@ class TranslationView(QWidget):
                 background-color: transparent;
             }
             QComboBox::down-arrow {
-                image: url(src/icons/down_arrow.svg);
+                image: url(src/icons/down_arrow_white.svg);
                 width: 12px;
                 height: 12px;
             }
@@ -750,7 +739,19 @@ class TranslationView(QWidget):
                 border-radius: 5px;
             }
             QMessageBox { background-color: #121212; color: #e0e0e0; }
+            QProgressBar {
+                border: 1px solid #3d3d3d;
+                border-radius: 3px;
+                background-color: #1e1e1e;
+                text-align: center;
+                color: #e0e0e0;
+            }
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+                width: 10px;
+            }
             """
+            # Apply the dark mode stylesheet
             QApplication.instance().setStyleSheet(dark_style)
             self.dark_mode_active = True
             
@@ -759,7 +760,68 @@ class TranslationView(QWidget):
             self.dark_mode_btn.setIcon(self.white_moon_icon)
             self.open_source_btn.setFixedSize(QSize(self.default_open_source_btn_size.width() + 5, self.default_open_source_btn_size.height() + 2))
         else:
-            QApplication.instance().setStyleSheet("")
+            # Define the light mode stylesheet
+            light_style = """
+            QPushButton { 
+                border-radius: 5px;
+                padding: 5px;
+                border: 1px solid #ccc;
+                background-color: #f8f9fa;
+            }
+            QPushButton:hover {
+                background-color: #e9ecef;
+            }
+            QPushButton:pressed {
+                background-color: #dee2e6;
+            }
+            QComboBox {
+                border-radius: 5px;
+                padding: 8px 25px 8px 8px;
+                border: 1px solid #ccc;
+                min-width: 6em;
+            }
+            QComboBox:hover {
+                background-color: rgb(217, 217, 217);
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+                border-radius: 5px;
+            }
+            QComboBox::down-arrow {
+                image: url(src/icons/down_arrow_dark.svg);
+                width: 12px;
+                height: 12px;
+            }
+            QComboBox QAbstractItemView {
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                selection-background-color: #e0e0e0;
+            }
+            QListWidget {
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                padding: 2px;
+            }
+            QLineEdit {
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                padding: 5px;
+                background-color: white;
+            }
+            QProgressBar {
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+                width: 10px;
+            }
+            """
+            
+            # Apply the light mode stylesheet
+            QApplication.instance().setStyleSheet(light_style)
             self.dark_mode_active = False
             self.drop_area.set_dark_mode(False)
             self.dark_mode_btn.setText("Dark Mode: OFF")

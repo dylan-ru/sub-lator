@@ -254,12 +254,6 @@ class SrtGenerationView(QWidget):
         output_layout.addStretch()  # Add stretch to keep widgets on the left
         layout.addLayout(output_layout)
 
-        # Remove the advanced sync checkbox as we'll always use advanced sync
-        # Instead, add an informational label about the sync
-        sync_info_label = QLabel("Using WhisperX for advanced subtitle synchronization")
-        sync_info_label.setToolTip("All subtitles will be synchronized using advanced AI-based alignment")
-        layout.addWidget(sync_info_label)
-
         # Progress section
         progress_layout = QVBoxLayout()
         self.progress_label = QLabel("Transcription Progress:")
