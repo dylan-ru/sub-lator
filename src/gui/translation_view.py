@@ -28,6 +28,15 @@ LANGUAGE_CODES = {
     "Chinese": "CN"
 }
 
+SUPPORTED_SUBTITLE_FORMATS = {
+    '.srt': 'SubRip',
+    '.vtt': 'WebVTT',
+    '.ass': 'Advanced SubStation Alpha',
+    '.ssa': 'SubStation Alpha',
+    '.txt': 'Plain Text',
+    '.sub': 'MicroDVD'
+}
+
 class TranslationView(QWidget):
     # Add signals for thread-safe UI updates
     update_progress = pyqtSignal(int)
@@ -325,18 +334,35 @@ class TranslationView(QWidget):
         self.output_dir = directory
         self._update_output_label()
 
+    def _validate_subtitle_file(self, file_path: str) -> Tuple[bool, str]:
+        """Validate that a file is a supported subtitle file."""
+        if not os.path.isfile(file_path):
+            return False, "File does not exist"
+            
+        _, ext = os.path.splitext(file_path)
+        if ext.lower() not in SUPPORTED_SUBTITLE_FORMATS:
+            return False, f"Not a supported subtitle format. Supported formats: {', '.join(SUPPORTED_SUBTITLE_FORMATS.keys())}"
+            
+        return True, "Valid subtitle file"
+
     def _handle_dropped_files(self, files: List[str]):
         """Handle dropped files or folders."""
         print("Dropped files/folders:", files)  # Debugging output
         files_to_add = []
         for file in files:
             if os.path.isdir(file):  # Check if the dropped item is a directory
-                # List all .srt files in the directory
-                srt_files = [os.path.join(file, f) for f in os.listdir(file) if f.endswith('.srt')]
-                print("Found .srt files:", srt_files)  # Debugging output
-                files_to_add.extend(srt_files)
-            elif file.endswith('.srt'):
-                files_to_add.append(file)  # Add individual .srt files
+                # List all supported subtitle files in the directory
+                subtitle_files = []
+                for root, _, filenames in os.walk(file):
+                    for filename in filenames:
+                        if any(filename.lower().endswith(ext) for ext in SUPPORTED_SUBTITLE_FORMATS):
+                            subtitle_files.append(os.path.join(root, filename))
+                print("Found subtitle files:", subtitle_files)  # Debugging output
+                files_to_add.extend(subtitle_files)
+            else:
+                # Check if the file has a supported extension
+                if any(file.lower().endswith(ext) for ext in SUPPORTED_SUBTITLE_FORMATS):
+                    files_to_add.append(file)
         
         # Add files without duplicates
         new_files_count = self._add_files_without_duplicates(files_to_add)
@@ -431,13 +457,16 @@ class TranslationView(QWidget):
                 self.update_status.emit(f"Processing file {file_index + 1} of {total_files}: {os.path.basename(input_file)}")
                 
                 try:
+                    # Get the original file extension
+                    _, file_extension = os.path.splitext(input_file)
+                    
                     # Read the input file
                     with open(input_file, 'r', encoding='utf-8') as f:
                         content = f.read().strip()
 
                     # Create translation prompt
                     translation_prompt = (
-                        f"Translate the following SRT subtitles to {self.language_combo.currentText()}. "
+                        f"Translate the following subtitles to {self.language_combo.currentText()}. "
                         "Important rules:\n"
                         "1. Preserve all numbers exactly as they are\n"
                         "2. Preserve all timecodes exactly as they are\n"
@@ -453,29 +482,35 @@ class TranslationView(QWidget):
                         self.model_combo.currentText()
                     )
                     
-                    # Save translated file
+                    # Save translated file with original extension
                     base_name = os.path.splitext(os.path.basename(input_file))[0]
                     output_dir = os.path.dirname(input_file) if self.store_at_original else (self.output_dir or ".")
                     lang_suffix = LANGUAGE_CODES.get(self.language_combo.currentText(), "XX")
-                    output_file = os.path.join(output_dir, f"{base_name}-{lang_suffix}.srt")
                     
+                    # Use the original file extension
+                    output_file = os.path.join(output_dir, f"{base_name}-{lang_suffix}{file_extension}")
+                    
+                    # Save the translated content
                     with open(output_file, 'w', encoding='utf-8') as f:
                         f.write(translated)
                     
                     translated_files.append(output_file)
                     
                     # Update progress
-                    progress = ((file_index + 1) * 100) / total_files
-                    self.update_progress.emit(int(progress))
+                    progress = int((file_index + 1) / total_files * 100)
+                    self.update_progress.emit(progress)
                     
                 except Exception as e:
-                    raise ValueError(f"Error processing file {input_file}: {str(e)}")
-            
+                    print(f"Error processing file {input_file}: {str(e)}")
+                    continue
+
             return translated_files
-            
+
         except Exception as e:
-            self.update_status.emit(f"Error: {str(e)}")
-            raise e
+            print(f"Translation error: {str(e)}")
+            return []
+
+
 
     def _on_translation_finished(self, translated_files):
         """Handle successful translation completion."""
@@ -693,26 +728,32 @@ class TranslationView(QWidget):
             self._update_file_list()
 
     def _open_source_folder(self):
-        """Open the source folder and find srt files."""
+        """Open the source folder and find subtitle files."""
         folder_path = QFileDialog.getExistingDirectory(self, "Select Source Folder")
         if folder_path:
-            # Analyze the folder for srt files
-            srt_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith('.srt')]
-            if srt_files:
+            # Analyze the folder for subtitle files
+            subtitle_files = []
+            for root, _, filenames in os.walk(folder_path):
+                for filename in filenames:
+                    if any(filename.lower().endswith(ext) for ext in SUPPORTED_SUBTITLE_FORMATS):
+                        subtitle_files.append(os.path.join(root, filename))
+            
+            if subtitle_files:
                 # Add files without duplicates
-                new_files_count = self._add_files_without_duplicates(srt_files)
+                new_files_count = self._add_files_without_duplicates(subtitle_files)
                 self._update_file_list()
                 
                 # Notify user if some files were skipped
-                if len(srt_files) > new_files_count:
-                    skipped = len(srt_files) - new_files_count
+                if len(subtitle_files) > new_files_count:
+                    skipped = len(subtitle_files) - new_files_count
                     QMessageBox.information(self, "Duplicate Files", 
                                            f"{skipped} file(s) skipped because they were already in the list.")
                 elif new_files_count == 0:
                     QMessageBox.information(self, "Duplicate Files", 
                                            "All files were already added to the list.")
             else:
-                QMessageBox.warning(self, "Warning", "No .srt files found in the selected folder.")
+                QMessageBox.warning(self, "Warning", 
+                                   f"No subtitle files found in the selected folder.\nSupported formats: {', '.join(SUPPORTED_SUBTITLE_FORMATS.keys())}")
 
     def toggle_dark_mode(self):
         if not self.dark_mode_active:
