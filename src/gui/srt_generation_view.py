@@ -275,30 +275,44 @@ class SrtGenerationView(QWidget):
         self.setLayout(layout)
 
     def _validate_video_file(self, file_path):
-        """Check if the file is a valid video format for transcription."""
-        if not os.path.exists(file_path):
-            return False, f"File does not exist: {file_path}"
+        """Validate that a file is a valid video file."""
+        # Check if file exists
+        if not os.path.isfile(file_path):
+            return False, "File does not exist"
             
-        # Check file extension
-        valid_extensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv']
+        # Check if file has video extension
+        video_extensions = ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v']
         _, ext = os.path.splitext(file_path)
-        if ext.lower() not in valid_extensions:
-            return False, f"Invalid file extension: {ext} (must be one of {', '.join(valid_extensions)})"
+        if ext.lower() not in video_extensions:
+            return False, "Not a supported video format"
             
-        # Check if file is accessible and has a reasonable size
+        # Additional validation could be done here, like checking file size or metadata
         try:
-            file_size = os.path.getsize(file_path)
-            if file_size < 1000:  # Less than 1KB
-                return False, f"File too small to be a valid video: {file_path}"
-            
-            # Check if file is not too large (>2GB)
-            if file_size > 2 * 1024 * 1024 * 1024:
-                print(f"Warning: Large file ({file_size / (1024*1024):.2f} MB): {file_path}")
-                
-            return True, "File is valid"
-            
+            # Could add ffmpeg probe validation here in the future
+            return True, "Valid video file"
         except Exception as e:
             return False, f"Error checking file: {str(e)}"
+
+    def _add_files_without_duplicates(self, files_to_add: List[str]) -> int:
+        """
+        Add video files to the list, skipping any duplicates.
+        Returns the number of new files actually added.
+        """
+        # Get basenames of existing files for easy comparison
+        existing_basenames = [os.path.basename(f) for f in self.video_files]
+        
+        # Filter files to only add those that don't already exist (by basename)
+        new_files = []
+        for file in files_to_add:
+            if os.path.basename(file) not in existing_basenames:
+                new_files.append(file)
+                existing_basenames.append(os.path.basename(file))  # Update our tracking list
+        
+        # Add new files to the list
+        self.video_files.extend(new_files)
+        
+        # Return count of new files added
+        return len(new_files)
 
     def _handle_dropped_files(self, files: List[str]):
         """Handle dropped video files and folders."""
@@ -320,13 +334,24 @@ class SrtGenerationView(QWidget):
                 else:
                     all_invalid_files.append(f"{os.path.basename(file_path)}: {message}")
         
-        # Add valid files to the list
+        # Add valid files to the list, avoiding duplicates
         if all_valid_files:
-            self.video_files.extend(all_valid_files)
+            new_files_count = self._add_files_without_duplicates(all_valid_files)
             self._update_file_list()
             
-            # Show success message using inlined toast
-            self._show_inline_toast(f"{len(all_valid_files)} video files added")
+            # Show appropriate message
+            if new_files_count > 0:
+                # Show success message using inlined toast
+                self._show_inline_toast(f"{new_files_count} video files added")
+                
+                # Notify if some files were skipped as duplicates
+                if len(all_valid_files) > new_files_count:
+                    skipped = len(all_valid_files) - new_files_count
+                    QMessageBox.information(self, "Duplicate Files", 
+                                           f"{skipped} file(s) skipped because they were already in the list.")
+            else:
+                QMessageBox.information(self, "Duplicate Files", 
+                                       "All files were already added to the list.")
         else:
             QMessageBox.warning(self, "No Videos Found", "No valid video files were found in the dropped items.")
 
@@ -359,13 +384,24 @@ class SrtGenerationView(QWidget):
             # Scan the folder for video files
             valid_files, invalid_files = self._scan_folder_for_videos(folder_path)
             
-            # Add valid files to the list
+            # Add valid files to the list, avoiding duplicates
             if valid_files:
-                self.video_files.extend(valid_files)
+                new_files_count = self._add_files_without_duplicates(valid_files)
                 self._update_file_list()
                 
-                # Show success message using inlined toast
-                self._show_inline_toast(f"{len(valid_files)} video files added")
+                # Show appropriate message
+                if new_files_count > 0:
+                    # Show success message using inlined toast
+                    self._show_inline_toast(f"{new_files_count} video files added")
+                    
+                    # Notify if some files were skipped as duplicates
+                    if len(valid_files) > new_files_count:
+                        skipped = len(valid_files) - new_files_count
+                        QMessageBox.information(self, "Duplicate Files", 
+                                               f"{skipped} file(s) skipped because they were already in the list.")
+                else:
+                    QMessageBox.information(self, "Duplicate Files", 
+                                           "All files were already added to the list.")
             else:
                 QMessageBox.warning(self, "No Videos Found", "No valid video files were found in the selected folder.")
 

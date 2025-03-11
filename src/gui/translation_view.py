@@ -328,15 +328,27 @@ class TranslationView(QWidget):
     def _handle_dropped_files(self, files: List[str]):
         """Handle dropped files or folders."""
         print("Dropped files/folders:", files)  # Debugging output
+        files_to_add = []
         for file in files:
             if os.path.isdir(file):  # Check if the dropped item is a directory
                 # List all .srt files in the directory
                 srt_files = [os.path.join(file, f) for f in os.listdir(file) if f.endswith('.srt')]
                 print("Found .srt files:", srt_files)  # Debugging output
-                self.files.extend(srt_files)  # Add found .srt files to the list
+                files_to_add.extend(srt_files)
             elif file.endswith('.srt'):
-                self.files.append(file)  # Add individual .srt files
-        self._update_file_list()  # Update the displayed file list
+                files_to_add.append(file)  # Add individual .srt files
+        
+        # Add files without duplicates
+        new_files_count = self._add_files_without_duplicates(files_to_add)
+        
+        # Update UI
+        self._update_file_list()
+        
+        # Notify user if some files were skipped
+        if len(files_to_add) > new_files_count:
+            skipped = len(files_to_add) - new_files_count
+            QMessageBox.information(self, "Duplicate Files", 
+                                   f"{skipped} file(s) skipped because they were already in the list.")
 
     def _update_file_list(self):
         """Update the list of files to be translated."""
@@ -350,6 +362,27 @@ class TranslationView(QWidget):
         self.store_at_original = is_checked
         self.select_dir_btn.setEnabled(not is_checked)
         self._update_output_label()
+
+    def _add_files_without_duplicates(self, files_to_add: List[str]) -> int:
+        """
+        Add files to the list, skipping any duplicates.
+        Returns the number of new files actually added.
+        """
+        # Get basenames of existing files for easy comparison
+        existing_basenames = [os.path.basename(f) for f in self.files]
+        
+        # Filter files to only add those that don't already exist (by basename)
+        new_files = []
+        for file in files_to_add:
+            if os.path.basename(file) not in existing_basenames:
+                new_files.append(file)
+                existing_basenames.append(os.path.basename(file))  # Update our tracking list
+        
+        # Add new files to the list
+        self.files.extend(new_files)
+        
+        # Return count of new files added
+        return len(new_files)
 
     def _select_output_directory(self):
         """Select output directory for translated files."""
@@ -666,8 +699,18 @@ class TranslationView(QWidget):
             # Analyze the folder for srt files
             srt_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith('.srt')]
             if srt_files:
-                self.files.extend(srt_files)
+                # Add files without duplicates
+                new_files_count = self._add_files_without_duplicates(srt_files)
                 self._update_file_list()
+                
+                # Notify user if some files were skipped
+                if len(srt_files) > new_files_count:
+                    skipped = len(srt_files) - new_files_count
+                    QMessageBox.information(self, "Duplicate Files", 
+                                           f"{skipped} file(s) skipped because they were already in the list.")
+                elif new_files_count == 0:
+                    QMessageBox.information(self, "Duplicate Files", 
+                                           "All files were already added to the list.")
             else:
                 QMessageBox.warning(self, "Warning", "No .srt files found in the selected folder.")
 
