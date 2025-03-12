@@ -577,6 +577,27 @@ class SrtGenerationView(QWidget):
         self.processed_videos = 0
         self.successful_videos = 0
         
+        # Initialize time tracking
+        from src.utils.time_tracker import ProcessTimeTracker
+        self.time_tracker = ProcessTimeTracker(len(video_files))
+        
+        # Create or update time remaining label if it doesn't exist
+        if not hasattr(self, 'time_remaining_label'):
+            self.time_remaining_label = QLabel("Time Remaining: Calculating...", self)
+            self.time_remaining_label.setStyleSheet("color: #666; font-size: 12px;")
+            self.layout().addWidget(self.time_remaining_label)
+        else:
+            self.time_remaining_label.setText("Time Remaining: Calculating...")
+            self.time_remaining_label.setVisible(True)
+        
+        # Start timer to update time remaining display
+        if not hasattr(self, 'time_update_timer'):
+            self.time_update_timer = QTimer(self)
+            self.time_update_timer.timeout.connect(self._update_time_remaining)
+        
+        # Start the timer to update every 5 seconds
+        self.time_update_timer.start(5000)  # 5000 ms = 5 seconds
+        
         # Update status
         self.status_label.setText(f"Starting transcription: 0/{self.total_videos} videos processed")
         QCoreApplication.processEvents()  # Force UI update
@@ -750,6 +771,14 @@ class SrtGenerationView(QWidget):
             self.progress_bar.setValue(100)
             QCoreApplication.processEvents()  # Force UI update
             
+            # Stop the time update timer
+            if hasattr(self, 'time_update_timer') and self.time_update_timer.isActive():
+                self.time_update_timer.stop()
+                
+            # Update the time remaining label to indicate completion
+            if hasattr(self, 'time_remaining_label'):
+                self.time_remaining_label.setText("Time Remaining: Complete")
+            
             # Clean up any remaining temporary files
             self._cleanup_temp_files()
             
@@ -784,6 +813,11 @@ class SrtGenerationView(QWidget):
             # Clean up references
             self.worker_thread = None
             self.current_video = None
+            self.video_queue = []
+            
+            # Reset processing state
+            self.processed_videos = 0
+            self.total_videos = 0
             
             # Process any pending events before returning
             QCoreApplication.processEvents()
@@ -821,16 +855,36 @@ class SrtGenerationView(QWidget):
             # Update status
             current_status = f"Processing video {self.processed_videos + 1}/{self.total_videos}: {os.path.basename(video_file)}"
             
+            # Try to get video duration if available - Note this might return None
+            video_duration = self._get_video_duration(video_file)
+            
             # Extract audio from video
             step_progress = base_progress + (video_progress_increment * 0.05)  # 5% of video progress
             self.progress_bar.setValue(int(step_progress))
             self.status_label.setText(f"{current_status} - Extracting audio...")
             QCoreApplication.processEvents()  # Force UI update
             
+            # Start extraction phase tracking
+            if hasattr(self, 'time_tracker') and self.time_tracker:
+                self.time_tracker.start_phase('extraction', video_file, video_duration)
+            
             audio_path = await self._extract_audio(video_file)
+            
+            # End extraction phase tracking
+            if hasattr(self, 'time_tracker') and self.time_tracker:
+                self.time_tracker.end_phase(success=(audio_path is not None))
+                
             if not audio_path:
                 print(f"Failed to extract audio from {video_file}")
                 return False
+            
+            # After audio extraction, we may have a more accurate duration from the audio file
+            # Update video_duration if it wasn't available before
+            if (video_duration is None and 
+                hasattr(self, 'current_audio_duration') and 
+                self.current_audio_duration is not None):
+                video_duration = self.current_audio_duration
+                print(f"Using audio duration for time tracking: {video_duration}")
             
             # Transcribe audio using assemblyai
             step_progress = base_progress + (video_progress_increment * 0.25)  # 25% of video progress
@@ -838,8 +892,17 @@ class SrtGenerationView(QWidget):
             self.status_label.setText(f"{current_status} - Transcribing...")
             QCoreApplication.processEvents()  # Force UI update
             
+            # Start transcription phase tracking
+            if hasattr(self, 'time_tracker') and self.time_tracker:
+                self.time_tracker.start_phase('transcription', video_file, video_duration)
+            
             # Create transcript
             transcript = await self._create_transcript(audio_path)
+            
+            # End transcription phase tracking
+            if hasattr(self, 'time_tracker') and self.time_tracker:
+                self.time_tracker.end_phase(success=(transcript is not None))
+                
             if not transcript:
                 print(f"Failed to create transcript for {video_file}")
                 return False
@@ -850,6 +913,10 @@ class SrtGenerationView(QWidget):
             self.status_label.setText(f"{current_status} - Formatting subtitles...")
             QCoreApplication.processEvents()  # Force UI update
             
+            # Start SRT generation phase tracking
+            if hasattr(self, 'time_tracker') and self.time_tracker:
+                self.time_tracker.start_phase('srt_generation', video_file, video_duration)
+            
             srt_path = self._get_srt_path(video_file)
             srt_content = self._format_srt(transcript, self.current_audio_duration)
             
@@ -857,12 +924,32 @@ class SrtGenerationView(QWidget):
             with open(srt_path, 'w', encoding='utf-8') as f:
                 f.write(srt_content)
             
+            # End SRT generation phase tracking
+            if hasattr(self, 'time_tracker') and self.time_tracker:
+                self.time_tracker.end_phase(success=True)
+                
             print(f"Saved SRT file: {srt_path}")
             
             # Set progress for this file complete
             step_progress = base_progress + video_progress_increment
             self.progress_bar.setValue(int(step_progress))
             QCoreApplication.processEvents()  # Force UI update
+            
+            # Update time tracking for completed video
+            if hasattr(self, 'time_tracker') and self.time_tracker:
+                self.time_tracker.complete_video(video_file)
+                
+                # Update the time remaining display
+                if hasattr(self, 'time_remaining_label'):
+                    remaining_time = self.time_tracker.estimate_remaining_time()
+                    if remaining_time:
+                        minutes, seconds = divmod(int(remaining_time), 60)
+                        hours, minutes = divmod(minutes, 60)
+                        if hours > 0:
+                            time_str = f"{hours}h {minutes}m {seconds}s"
+                        else:
+                            time_str = f"{minutes}m {seconds}s"
+                        self.time_remaining_label.setText(f"Time Remaining: {time_str}")
             
             # Clean up the audio file after processing this video
             try:
@@ -1764,6 +1851,86 @@ class SrtGenerationView(QWidget):
                     width: 10px;
                 }
             """)
+
+    def _update_time_remaining(self):
+        """Update the time remaining display based on current progress"""
+        if hasattr(self, 'time_tracker') and self.time_tracker:
+            remaining_time = self.time_tracker.estimate_remaining_time()
+            if remaining_time:
+                minutes, seconds = divmod(int(remaining_time), 60)
+                hours, minutes = divmod(minutes, 60)
+                if hours > 0:
+                    time_str = f"{hours}h {minutes}m {seconds}s"
+                else:
+                    time_str = f"{minutes}m {seconds}s"
+                self.time_remaining_label.setText(f"Time Remaining: {time_str}")
+            else:
+                self.time_remaining_label.setText("Time Remaining: Calculating...")
+
+    def _get_video_duration(self, video_file):
+        """Get the duration of a video file in seconds"""
+        try:
+            # Method 1: Try to use ffprobe to get duration (part of ffmpeg)
+            try:
+                import subprocess
+                import json
+                
+                # Use ffprobe to get duration info in JSON format
+                cmd = [
+                    'ffprobe', 
+                    '-v', 'error', 
+                    '-show_entries', 'format=duration', 
+                    '-of', 'json',
+                    video_file
+                ]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode == 0:
+                    data = json.loads(result.stdout)
+                    if 'format' in data and 'duration' in data['format']:
+                        return float(data['format']['duration'])
+            except Exception as e:
+                print(f"ffprobe method failed: {str(e)}")
+
+            # Method 2: Fallback to Qt Multimedia if available
+            if has_qt_multimedia:
+                try:
+                    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+                    from PyQt6.QtCore import QUrl
+                    
+                    player = QMediaPlayer()
+                    player.setSource(QUrl.fromLocalFile(video_file))
+                    # Wait a bit for duration to be loaded
+                    from PyQt6.QtCore import QEventLoop, QTimer
+                    loop = QEventLoop()
+                    timer = QTimer()
+                    timer.setSingleShot(True)
+                    timer.timeout.connect(loop.quit)
+                    timer.start(1000)  # Give it 1 second to load
+                    loop.exec()
+                    
+                    duration_ms = player.duration()
+                    player.stop()
+                    player = None  # Help with cleanup
+                    
+                    if duration_ms > 0:
+                        return duration_ms / 1000.0  # Convert ms to seconds
+                except Exception as e:
+                    print(f"Qt Multimedia method failed: {str(e)}")
+            
+            # Method 3: Check if we already have the audio duration for this file
+            # This will only work after audio extraction, so it's not always available
+            if hasattr(self, 'current_audio_duration') and self.current_audio_duration is not None:
+                print(f"Using already extracted audio duration: {self.current_audio_duration}")
+                return self.current_audio_duration
+            
+            # If we got here, all methods failed
+            print(f"Could not determine duration for {video_file}")
+            return None
+            
+        except Exception as e:
+            print(f"Error getting video duration: {str(e)}")
+            return None
 
 class SimpleUtterance:
     """Simple class to represent an utterance with text and timing"""

@@ -390,7 +390,7 @@ class TranslationView(QWidget):
         # Show error toast if some files were skipped due to duplicates
         if len(files_to_add) > new_files_count:
             skipped = len(files_to_add) - new_files_count
-            self._show_inline_toast(f"{skipped} duplicate file(s) skipped", toast_type='error')
+            # Removed toast notification: "X duplicate file(s) skipped"
             # Still show the information dialog
             QMessageBox.information(self, "Duplicate Files", 
                                    f"{skipped} file(s) skipped because they were already in the list.")
@@ -767,16 +767,16 @@ class TranslationView(QWidget):
                 # Show error toast if some files were skipped due to duplicates
                 if len(subtitle_files) > new_files_count:
                     skipped = len(subtitle_files) - new_files_count
-                    self._show_inline_toast(f"{skipped} duplicate file(s) skipped", toast_type='error')
+                    # Removed toast notification: "X duplicate file(s) skipped"
                     # Still show the information dialog
                     QMessageBox.information(self, "Duplicate Files", 
                                            f"{skipped} file(s) skipped because they were already in the list.")
                 elif new_files_count == 0:
-                    self._show_inline_toast("All files already exist in the list", toast_type='error')
+                    # Removed toast notification: "All files already exist in the list"
                     QMessageBox.information(self, "Duplicate Files", 
                                            "All files were already added to the list.")
             else:
-                self._show_inline_toast("No subtitle files found", toast_type='error')
+                # Removed toast notification: "No subtitle files found"
                 QMessageBox.warning(self, "Warning", "No subtitle files found in the selected folder.")
 
     def toggle_dark_mode(self):
