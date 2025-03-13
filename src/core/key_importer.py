@@ -23,10 +23,10 @@ class KeyImporter:
                 content = f.read()
                 api_keys = [line.strip() for line in content.splitlines() if line.strip()]
                 if not api_keys:
-                    raise ValueError("No API keys found in the text file")
+                    raise ValueError("No API keys found")
                 return api_keys
         except Exception as e:
-            raise ValueError(f"Error reading text file: {str(e)}")
+            raise ValueError(f"Error reading file: {str(e)}")
 
     def import_keys_from_zip(self, zip_path: str) -> List[str]:
         """
@@ -49,13 +49,13 @@ class KeyImporter:
                     
                     txt_files = [f for f in files if f.endswith('.txt')]
                     if not txt_files:
-                        raise ValueError("No text file found in the zip archive")
+                        raise ValueError("No file found in the zip archive")
                         
                     try:
                         # Try to read without password
                         test_zip.read(txt_files[0])
                         # If we get here, the file is not password protected
-                        raise ValueError("File is not password protected. Please create a password-protected zip file.")
+                        raise ValueError("File is not accepted. Please make sure you get the file from the correct source.")
                     except RuntimeError as e:
                         if "password required" in str(e).lower() or "encrypted" in str(e).lower():
                             # This is what we want - file is password protected

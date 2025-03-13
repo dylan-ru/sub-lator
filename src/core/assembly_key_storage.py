@@ -33,7 +33,7 @@ class AssemblyKeyStorage:
     def add_key(self, api_key: str):
         """Add a new API key if it doesn't exist."""
         if api_key not in self.api_keys:
-            self.api_keys = [api_key]  # Only store one key at a time
+            self.api_keys.append(api_key)  # Append to list instead of replacing
             self._save_keys()
 
     def remove_key(self, api_key: str):
