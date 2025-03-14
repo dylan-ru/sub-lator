@@ -87,28 +87,47 @@ class TranslationView(QWidget):
         """Handle cleanup when the widget is closed."""
         self.update_timer.stop()
         if self.current_worker and self.current_worker.isRunning():
-            self.current_worker.quit()
-            self.current_worker.wait()
-            self.current_worker.deleteLater()
+            try:
+                print("Stopping translation worker during window close")
+                self.current_worker.stop()  # Use stop() instead of quit() and wait()
+                # Give a moment for thread cleanup
+                from PyQt6.QtCore import QCoreApplication
+                QCoreApplication.processEvents()
+                self.current_worker.deleteLater()
+                self.current_worker = None
+            except Exception as e:
+                print(f"Error stopping worker thread during close: {str(e)}")
         super().closeEvent(event)
 
     def hideEvent(self, event):
         """Handle cleanup when the widget is hidden."""
         if self.current_worker and self.current_worker.isRunning():
-            self.current_worker.quit()
-            self.current_worker.wait()
-            self.current_worker.deleteLater()
-            self.current_worker = None
+            try:
+                print("Stopping translation worker during hide")
+                self.current_worker.stop()  # Use stop() instead of quit() and wait()
+                # Give a moment for thread cleanup
+                from PyQt6.QtCore import QCoreApplication
+                QCoreApplication.processEvents()
+                self.current_worker.deleteLater()
+                self.current_worker = None
+            except Exception as e:
+                print(f"Error stopping worker thread during hide: {str(e)}")
         super().hideEvent(event)
 
     def _cleanup_worker(self):
         """Clean up the current worker if it exists."""
         if self.current_worker:
-            if self.current_worker.isRunning():
-                self.current_worker.quit()
-                self.current_worker.wait()
-            self.current_worker.deleteLater()
-            self.current_worker = None
+            try:
+                if self.current_worker.isRunning():
+                    print("Stopping translation worker during cleanup")
+                    self.current_worker.stop()  # Use stop() instead of quit() and wait()
+                    # Give a moment for thread cleanup
+                    from PyQt6.QtCore import QCoreApplication
+                    QCoreApplication.processEvents()
+                self.current_worker.deleteLater()
+                self.current_worker = None
+            except Exception as e:
+                print(f"Error cleaning up worker thread: {str(e)}")
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -473,6 +492,11 @@ class TranslationView(QWidget):
             translated_files = []
 
             for file_index, input_file in enumerate(self.files):
+                # Check if worker has been stopped (application closed or operation aborted)
+                if hasattr(self.current_worker, 'is_running') and not self.current_worker.is_running:
+                    print("Translation process aborted - stopping file processing")
+                    break
+                    
                 self.update_status.emit(f"Processing file {file_index + 1} of {total_files}: {os.path.basename(input_file)}")
                 
                 try:
@@ -494,12 +518,22 @@ class TranslationView(QWidget):
                         f"{content}"
                     )
                     
+                    # Check again if translation has been aborted
+                    if hasattr(self.current_worker, 'is_running') and not self.current_worker.is_running:
+                        print("Translation process aborted - stopping before API call")
+                        break
+                    
                     # Translate content
                     self.update_status.emit(f"Translating file: {os.path.basename(input_file)}")
                     translated = self.translation_service.translate(
                         translation_prompt,
                         self.model_combo.currentText()
                     )
+                    
+                    # Check again if translation has been aborted
+                    if hasattr(self.current_worker, 'is_running') and not self.current_worker.is_running:
+                        print("Translation process aborted - stopping before saving file")
+                        break
                     
                     # Save translated file with original extension
                     base_name = os.path.splitext(os.path.basename(input_file))[0]
@@ -523,6 +557,10 @@ class TranslationView(QWidget):
                     print(f"Error processing file {input_file}: {str(e)}")
                     continue
 
+            # Set a final status message if the process was aborted
+            if hasattr(self.current_worker, 'is_running') and not self.current_worker.is_running:
+                self.update_status.emit("Translation process was aborted")
+                
             return translated_files
 
         except Exception as e:
@@ -645,15 +683,9 @@ class TranslationView(QWidget):
         else:
             masked_key = "*" * len(key)
             
-        status = self.translation_service.get_key_status(key)
-        if status:
-            cooldown = status["cooldown_remaining"]
-            status_text = "Ready" if status["is_available"] else f"Cooldown: {cooldown:.1f}s"
-            self.api_keys_list.addItem(f"{self.current_provider}: {masked_key} [{status_text}]")
-        else:
-            # If no status, just show the key without status
-            self.api_keys_list.addItem(f"{self.current_provider}: {masked_key}")
-            
+        # Always show key as Ready since cooldowns are disabled
+        self.api_keys_list.addItem(f"{self.current_provider}: {masked_key} [Ready]")
+        
         # Set the first key as selected
         if self.api_keys_list.count() > 0:
             self.api_keys_list.setCurrentRow(0)

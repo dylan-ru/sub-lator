@@ -137,6 +137,9 @@ class ApiKeyManager:
 
 class SrtGenerationView(QWidget):
     switch_to_translation = pyqtSignal()  # Signal to switch back to translation view
+    
+    # Define file size limit constant - 1GB in bytes
+    FILE_SIZE_LIMIT = 1 * 1024 * 1024 * 1024
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -320,7 +323,16 @@ class SrtGenerationView(QWidget):
         if ext.lower() not in video_extensions:
             return False, "Not a supported video format"
             
-        # Additional validation could be done here, like checking file size or metadata
+        # Check file size - limit to 1GB
+        try:
+            file_size = os.path.getsize(file_path)
+            if file_size > self.FILE_SIZE_LIMIT:
+                size_in_gb = file_size / (1024 * 1024 * 1024)
+                return False, f"File exceeds the 1GB size limit. Current size: {size_in_gb:.2f}GB"
+        except Exception as e:
+            return False, f"Error checking file size: {str(e)}"
+            
+        # Additional validation could be done here, like checking metadata
         try:
             # Could add ffmpeg probe validation here in the future
             return True, "Valid video file"
@@ -368,6 +380,22 @@ class SrtGenerationView(QWidget):
                 else:
                     all_invalid_files.append(f"{os.path.basename(file_path)}: {message}")
         
+        # Always show messages about invalid files if any exist
+        if all_invalid_files:
+            # Prepare a user-friendly message with the first few errors
+            if len(all_invalid_files) <= 3:
+                error_details = "\n• " + "\n• ".join(all_invalid_files)
+            else:
+                # Show first 3 and a count of remaining
+                error_details = "\n• " + "\n• ".join(all_invalid_files[:3])
+                error_details += f"\n• ...and {len(all_invalid_files) - 3} more invalid file(s)"
+                
+            QMessageBox.warning(
+                self, 
+                "Invalid Files", 
+                f"The following files could not be added:{error_details}"
+            )
+        
         # Add valid files to the list, avoiding duplicates
         if all_valid_files:
             new_files_count = self._add_files_without_duplicates(all_valid_files)
@@ -386,7 +414,7 @@ class SrtGenerationView(QWidget):
             else:
                 QMessageBox.information(self, "Duplicate Files", 
                                        "All files were already added to the list.")
-        else:
+        elif not all_invalid_files:  # Only show this if there are no files at all (neither valid nor invalid)
             QMessageBox.warning(self, "No Videos Found", "No valid video files were found in the dropped items.")
 
     def _update_file_list(self):
@@ -418,6 +446,22 @@ class SrtGenerationView(QWidget):
             # Scan the folder for video files
             valid_files, invalid_files = self._scan_folder_for_videos(folder_path)
             
+            # Always show messages about invalid files if any exist
+            if invalid_files:
+                # Prepare a user-friendly message with the first few errors
+                if len(invalid_files) <= 3:
+                    error_details = "\n• " + "\n• ".join(invalid_files)
+                else:
+                    # Show first 3 and a count of remaining
+                    error_details = "\n• " + "\n• ".join(invalid_files[:3])
+                    error_details += f"\n• ...and {len(invalid_files) - 3} more invalid file(s)"
+                    
+                QMessageBox.warning(
+                    self, 
+                    "Invalid Files", 
+                    f"The following files could not be added:{error_details}"
+                )
+            
             # Add valid files to the list, avoiding duplicates
             if valid_files:
                 new_files_count = self._add_files_without_duplicates(valid_files)
@@ -436,7 +480,7 @@ class SrtGenerationView(QWidget):
                 else:
                     QMessageBox.information(self, "Duplicate Files", 
                                            "All files were already added to the list.")
-            else:
+            elif not invalid_files:  # Only show this if there are no files at all (neither valid nor invalid)
                 QMessageBox.warning(self, "No Videos Found", "No valid video files were found in the selected folder.")
 
     def _remove_selected_file(self):

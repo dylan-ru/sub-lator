@@ -8,7 +8,7 @@ from .key_storage import KeyStorage
 class ApiKeyInfo:
     key: str
     last_used: float = 0
-    cooldown_period: float = 5.0  # 5 seconds cooldown
+    cooldown_period: float = 0.0  # Changed from 5.0 to 0.0 to remove cooldown
 
 class ApiKeyManager:
     def __init__(self):
@@ -44,23 +44,19 @@ class ApiKeyManager:
             return None
 
         with self._lock:
-            current_time = time()
             keys = list(self._keys.values())
             
-            # Try to find an available key starting from the current index
-            for _ in range(len(keys)):
-                key_info = keys[self._current_key_index]
-                if current_time - key_info.last_used >= key_info.cooldown_period:
-                    # Update last used time and return the key
-                    key_info.last_used = current_time
-                    key = key_info.key
-                    # Move to next key for next request
-                    self._current_key_index = (self._current_key_index + 1) % len(keys)
-                    return key
-                self._current_key_index = (self._current_key_index + 1) % len(keys)
-
-            # If no key is available, return None
-            return None
+            if not keys:
+                return None
+            
+            # Get the next key regardless of last_used time (no cooldown check)
+            key_info = keys[self._current_key_index]
+            # Still track the last time it was used for informational purposes
+            key_info.last_used = time()
+            key = key_info.key
+            # Move to next key for next request
+            self._current_key_index = (self._current_key_index + 1) % len(keys)
+            return key
 
     def get_all_keys(self) -> list[str]:
         """Get all registered API keys."""
@@ -70,14 +66,14 @@ class ApiKeyManager:
         """Get the status of a specific API key."""
         if key not in self._keys:
             return None
-            
+        
         key_info = self._keys[key]
         current_time = time()
         time_since_last_use = current_time - key_info.last_used
-        is_available = time_since_last_use >= key_info.cooldown_period
         
+        # Always report key as available since cooldown is disabled
         return {
             "last_used": key_info.last_used,
-            "cooldown_remaining": max(0, key_info.cooldown_period - time_since_last_use),
-            "is_available": is_available
+            "cooldown_remaining": 0.0,  # Always report 0 cooldown remaining
+            "is_available": True  # Key is always available
         }

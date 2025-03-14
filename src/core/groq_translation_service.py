@@ -91,8 +91,8 @@ class GroqTranslationService:
                 json=payload
             )
             
-            # Mark the key as available again with cooldown
-            self._update_key_status(api_key, True, 1.0)  # 1 second cooldown
+            # Mark the key as available again with no cooldown
+            self._update_key_status(api_key, True, 0.0)  # Changed from 1.0 to 0.0
             
             # Parse the response
             response_json = response.json()
@@ -107,8 +107,8 @@ class GroqTranslationService:
             return translated_text
                 
         except Exception as e:
-            # Mark the key as available again but with a longer cooldown due to error
-            self._update_key_status(api_key, True, 5.0)  # 5 second cooldown after error
+            # Mark the key as available again with no cooldown
+            self._update_key_status(api_key, True, 0.0)  # Changed from 5.0 to 0.0
             raise ValueError(f"Error during translation: {str(e)}")
     
     def _update_key_status(self, key: str, is_available: bool, cooldown: float = 0.0) -> None:
@@ -117,8 +117,8 @@ class GroqTranslationService:
         self._key_statuses[key] = {
             "is_available": is_available,
             "last_used": current_time,
-            "cooldown": cooldown,
-            "available_at": current_time + cooldown
+            "cooldown": 0.0,  # Always set cooldown to 0
+            "available_at": current_time  # Key is always immediately available
         }
     
     def get_key_status(self, key: str) -> Optional[Dict[str, Any]]:
@@ -126,18 +126,8 @@ class GroqTranslationService:
         if key not in self._key_statuses:
             return None
             
-        status = self._key_statuses[key]
-        current_time = time.time()
-        
-        # Calculate remaining cooldown
-        if status["available_at"] > current_time:
-            cooldown_remaining = status["available_at"] - current_time
-            is_available = False
-        else:
-            cooldown_remaining = 0.0
-            is_available = True
-            
+        # Return key as always available with no cooldown
         return {
-            "is_available": is_available,
-            "cooldown_remaining": cooldown_remaining
+            "is_available": True,
+            "cooldown_remaining": 0.0
         } 
