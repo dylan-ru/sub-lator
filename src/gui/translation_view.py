@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                             QMessageBox, QProgressBar, QCheckBox, QFileDialog, QApplication, QFrame)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMetaObject, Q_ARG, QSize
 import os
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from ..core.translation_service import OpenRouterTranslationService
 from ..core.groq_translation_service import GroqTranslationService
 from ..core.key_importer import KeyImporter
@@ -63,7 +63,7 @@ class TranslationView(QWidget):
         self.store_at_original = True  # Set to True by default
         self.output_dir = None
         self.current_worker: Optional[AsyncWorker] = None
-        
+
         # Connect signals to slots
         self.update_progress.connect(self._update_progress_bar)
         self.update_status.connect(self._update_status_label)
@@ -73,6 +73,9 @@ class TranslationView(QWidget):
         
         # Update the API key list immediately after UI initialization
         self._update_key_list()
+        
+        # Initialize output directory button state
+        self._toggle_output_directory(Qt.CheckState.Checked)
         
         # Set initial dark mode state
         self.dark_mode_active = False  # Set to opposite of desired state (dark mode ON)
@@ -525,10 +528,25 @@ class TranslationView(QWidget):
                     
                     # Translate content
                     self.update_status.emit(f"Translating file: {os.path.basename(input_file)}")
-                    translated = self.translation_service.translate(
-                        translation_prompt,
-                        self.model_combo.currentText()
-                    )
+                    
+                    # Create a status callback for real-time updates
+                    def status_callback(message):
+                        self.update_status.emit(f"{os.path.basename(input_file)}: {message}")
+                    
+                    # Handle different translation service implementations (sync vs async)
+                    if self.current_provider == "Groq":
+                        # Groq service is async and supports status_callback
+                        translated = await self.translation_service.translate(
+                            translation_prompt,
+                            self.model_combo.currentText(),
+                            status_callback=status_callback
+                        )
+                    else:
+                        # OpenRouter service is synchronous and doesn't support status_callback
+                        translated = self.translation_service.translate(
+                            translation_prompt,
+                            self.model_combo.currentText()
+                        )
                     
                     # Check again if translation has been aborted
                     if hasattr(self.current_worker, 'is_running') and not self.current_worker.is_running:
@@ -555,22 +573,30 @@ class TranslationView(QWidget):
                     
                 except Exception as e:
                     print(f"Error processing file {input_file}: {str(e)}")
+                    self.update_status.emit(f"Error translating {os.path.basename(input_file)}: {str(e)}")
                     continue
 
             # Set a final status message if the process was aborted
             if hasattr(self.current_worker, 'is_running') and not self.current_worker.is_running:
                 self.update_status.emit("Translation process was aborted")
-                
+            
             return translated_files
-
+            
         except Exception as e:
             print(f"Translation error: {str(e)}")
+            self.update_status.emit(f"Translation error: {str(e)}")
             return []
 
     def _on_translation_finished(self, translated_files):
         """Handle successful translation completion."""
+        # Always re-enable UI elements
+        self.translate_btn.setEnabled(True)
+        self._update_key_list()
+        self._cleanup_worker()
+        
         if not translated_files:
             self.update_status.emit("No files were translated")
+            QMessageBox.warning(self, "Translation Result", "No files were translated. This could be because:\n\n1. An error occurred during translation\n2. The selected model requires payment\n3. The API key is invalid or has expired")
             return
             
         # Show success message with list of translated files
@@ -580,9 +606,6 @@ class TranslationView(QWidget):
             
         QMessageBox.information(self, "Success", message)
         self.update_status.emit("Translation completed successfully")
-        self.translate_btn.setEnabled(True)
-        self._update_key_list()
-        self._cleanup_worker()
         
         # Clear the file list
         self._clear_files()
@@ -591,6 +614,7 @@ class TranslationView(QWidget):
         """Handle translation error."""
         self.update_status.emit(f"Error: {str(error)}")
         QMessageBox.critical(self, "Error", str(error))
+        # Ensure UI is re-enabled
         self.translate_btn.setEnabled(True)
         self._update_key_list()
         self._cleanup_worker()
@@ -685,7 +709,7 @@ class TranslationView(QWidget):
             
         # Always show key as Ready since cooldowns are disabled
         self.api_keys_list.addItem(f"{self.current_provider}: {masked_key} [Ready]")
-        
+            
         # Set the first key as selected
         if self.api_keys_list.count() > 0:
             self.api_keys_list.setCurrentRow(0)
@@ -823,7 +847,7 @@ class TranslationView(QWidget):
                 padding: 5px;
                 border-radius: 5px;
             }
-            QPushButton:hover { 
+            QPushButton:hover {
                 background-color: #494949 !important;
             }
             QPushButton:pressed { 
@@ -831,7 +855,7 @@ class TranslationView(QWidget):
             }
             QLineEdit { 
                 background-color: #1e1e1e; 
-                color: #e0e0e0;
+                color: #e0e0e0; 
                 border: 1px solid #3d3d3d;
                 border-radius: 5px;
                 padding: 5px;
@@ -1152,39 +1176,118 @@ class TranslationView(QWidget):
         
         return toast
 
+    def _is_groq_key(self, key: str) -> bool:
+        """Check if a key follows the Groq API key format."""
+        return key.strip().startswith("gsk_")
+
+    def _is_openrouter_key(self, key: str) -> bool:
+        """Check if a key follows the OpenRouter API key format."""
+        return key.strip().startswith("sk-or-")
+
+    def _is_assembly_key(self, key: str) -> bool:
+        """Check if a key follows the AssemblyAI API key format (32-char hex string)."""
+        key = key.strip()
+        if len(key) != 32:
+            return False
+        try:
+            int(key, 16)
+            return True
+        except ValueError:
+            return False
+            
+    def _add_assembly_keys(self, keys: list) -> bool:
+        """Handle AssemblyAI API keys found during import."""
+        if not keys:
+            return False
+        try:
+            from ..core.assembly_key_storage import AssemblyKeyStorage
+            assembly_storage = AssemblyKeyStorage()
+            added = False
+            for key in keys:
+                if key not in assembly_storage.get_keys():
+                    assembly_storage.add_key(key)
+                    added = True
+            
+            # If keys were added, initialize them for immediate use
+            if added and keys:
+                try:
+                    import assemblyai as aai
+                    # Set the AssemblyAI API key directly for immediate use
+                    aai.settings.api_key = keys[0]
+                except ImportError:
+                    # AssemblyAI module not available, but keys are stored for later use
+                    pass
+                    
+            return added
+        except ImportError:
+            return False
+
     def _import_api_keys(self):
-        """Handle the import of API keys from a zip file."""
+        """Handle the import of API keys from a zip file with provider validation."""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select API Keys File",
             "",
             "ZIP files (*.zip)"
         )
-        
         if not file_path:
             return
-            
         try:
-            # Create key importer with the predefined password
             importer = KeyImporter("ZjcGbbwDjzDDkdL")
-            
-            # Import keys from the zip file
             imported_keys = importer.import_keys_from_zip(file_path)
+            groq_keys = [key for key in imported_keys if self._is_groq_key(key)]
+            openrouter_keys = [key for key in imported_keys if self._is_openrouter_key(key)]
+            assembly_keys = [key for key in imported_keys if self._is_assembly_key(key)]
+            invalid_keys = [key for key in imported_keys if not (self._is_groq_key(key) or self._is_openrouter_key(key) or self._is_assembly_key(key))]
+
+            # Add keys based on provider type
+            current_provider = self.current_provider.lower()
             
-            # Add each imported key
-            for key in imported_keys:
-                self.translation_service.add_api_key(key)
+            # Add keys to appropriate storage
+            groq_added = False
+            openrouter_added = False
+            assembly_added = False
             
-            # Update the key list
-            self._update_key_list()
+            # Handle each provider type
+            if current_provider == "groq":
+                groq_added = self._add_keys_to_current_provider(groq_keys)
+                # Save OpenRouter keys if found
+                openrouter_added = self._add_keys(openrouter_keys, "openrouter")
+                # Save AssemblyAI keys if found
+                assembly_added = self._add_assembly_keys(assembly_keys)
+            elif current_provider == "openrouter":
+                openrouter_added = self._add_keys_to_current_provider(openrouter_keys)
+                # Save Groq keys if found
+                groq_added = self._add_keys(groq_keys, "groq")
+                # Save AssemblyAI keys if found
+                assembly_added = self._add_assembly_keys(assembly_keys)
             
-            # Show success message
-            QMessageBox.information(
-                self,
-                "Success",
-                f"Successfully imported API key"
-            )
+            # Prepare the import summary message
+            import_summary = []
+            if groq_added:
+                import_summary.append("Added Groq API key")
+            if openrouter_added:
+                import_summary.append("Added OpenRouter API key")
+            if assembly_added:
+                import_summary.append("Added AssemblyAI API key for SRT generation")
+            if len(invalid_keys) > 0:
+                import_summary.append(f"{len(invalid_keys)} invalid keys found")
+
+            if import_summary:
+                QMessageBox.information(
+                    self,
+                    "Import Results",
+                    "\n".join(import_summary)
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Import Results",
+                    "No valid API keys were found in the file"
+                )
             
+            # Update UI
+            self._update_api_key_list()
         except ValueError as e:
             QMessageBox.critical(
                 self,
@@ -1221,3 +1324,74 @@ class TranslationView(QWidget):
         # Add keys from storage
         for key in groq_keys:
             self.translation_services["Groq"].add_api_key(key)
+            
+        # Load AssemblyAI keys - ensure they're initialized for the SRT generation view
+        try:
+            from ..core.assembly_key_storage import AssemblyKeyStorage
+            from ..gui.srt_generation_view import ApiKeyManager
+            
+            # Initialize AssemblyAI keys through ApiKeyManager
+            assembly_storage = AssemblyKeyStorage()
+            assembly_keys = assembly_storage.get_keys()
+            
+            # If there are any AssemblyAI keys, initialize them
+            if assembly_keys:
+                try:
+                    import assemblyai as aai
+                    # Set the AssemblyAI API key directly in the module settings
+                    aai.settings.api_key = assembly_keys[0]
+                except ImportError:
+                    # AssemblyAI module not available, but keys are stored for later use
+                    pass
+        except ImportError:
+            # Assembly key storage not available
+            pass
+
+    def _add_keys_to_current_provider(self, keys: list) -> bool:
+        """Add keys to the current provider's storage."""
+        if not keys:
+            return False
+        provider = self.current_provider.lower()
+        return self._add_keys(keys, provider)
+        
+    def _add_keys(self, keys: list, provider: str) -> bool:
+        """Add keys to the specified provider's storage."""
+        if not keys or not provider:
+            return False
+            
+        added = False
+        if provider.lower() == "groq":
+            try:
+                from ..core.groq_key_storage import GroqKeyStorage
+                groq_storage = GroqKeyStorage()
+                for key in keys:
+                    if key not in groq_storage.get_keys():
+                        groq_storage.add_key(key)
+                        added = True
+                # If this is current provider, update the translation service
+                if self.current_provider.lower() == "groq":
+                    for key in keys:
+                        self.translation_service.add_api_key(key)
+            except ImportError:
+                pass
+        elif provider.lower() == "openrouter":
+            try:
+                from ..core.key_storage import KeyStorage
+                openrouter_storage = KeyStorage()
+                for key in keys:
+                    if key not in openrouter_storage.get_keys():
+                        openrouter_storage.add_key(key)
+                        added = True
+                # If this is current provider, update the translation service
+                if self.current_provider.lower() == "openrouter":
+                    for key in keys:
+                        self.translation_service.add_api_key(key)
+            except ImportError:
+                pass
+                
+        return added
+
+    def _update_api_key_list(self):
+        """Update the API key list in the UI."""
+        self._update_key_list()
+

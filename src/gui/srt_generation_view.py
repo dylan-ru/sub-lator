@@ -20,6 +20,9 @@ import time
 from ..core.subtitle_synchronizer import SubtitleSynchronizer  # Legacy synchronizer
 from ..core.whisper_synchronizer import WhisperSynchronizer  # New WhisperX-based synchronizer
 import asyncio
+from ..core.groq_key_storage import GroqKeyStorage
+from ..core.key_storage import KeyStorage
+from ..core.assembly_key_storage import AssemblyKeyStorage
 
 # Conditionally import PyQt6.QtMultimedia - it might not be installed
 has_qt_multimedia = False
@@ -31,108 +34,96 @@ except ImportError:
 
 class ApiKeyManager:
     def __init__(self):
-        self.current_provider = "AssemblyAI"  # Default provider
-        self.providers = {
-            "AssemblyAI": []  # Changed to a list to store multiple keys
-        }
-        self.current_key_index = 0  # Track which key to use next for rotation
+        """Initialize the API key manager for AssemblyAI."""
+        self.storage = AssemblyKeyStorage()
+        self.current_api_key = None
+        self._current_key_index = 0  # Track which key to use next for rotation
         self._initialize_providers()
+        self._load_keys_from_storage()
         
     def _initialize_providers(self):
-        """Load API keys from their provider-specific storage."""
-        factory = ApiProviderFactory()
-        
-        # Initialize providers with their factory instances
-        for provider_name in self.providers.keys():
-            try:
-                provider = factory.get_provider(provider_name)
-                if provider:
-                    # Get the API key from the provider's storage
-                    key = provider.get_api_key()
-                    if key:
-                        # Initialize with a list containing the key
-                        self.providers[provider_name] = [key]
-                    else:
-                        # Initialize with an empty list
-                        self.providers[provider_name] = []
-                        print(f"No API key found for {provider_name}")
-            except Exception as e:
-                print(f"Error initializing provider {provider_name}: {str(e)}")
-        
-    def save_key(self, key):
-        """Save an API key for the current provider."""
-        if not key:
-            raise ValueError("API key cannot be empty")
-            
+        """Initialize API providers and required configurations."""
         try:
-            # Get the provider to save the key
-            factory = ApiProviderFactory()
-            provider = factory.get_provider(self.current_provider)
+            import assemblyai as aai
+            # AssemblyAI is available
+            self.providers = {"assemblyai": {"module": aai}}
+        except ImportError:
+            print("Warning: assemblyai package not installed.")
+            self.providers = {}
             
-            if provider:
-                # For imported keys (multiple allowed), add to the list if not already present
-                if not self.providers[self.current_provider]:
-                    self.providers[self.current_provider] = []
-                
-                # Check if the key is already in the list to avoid duplicates
-                if key not in self.providers[self.current_provider]:
-                    # Call add_key directly instead of set_api_key to avoid removing existing keys
-                    provider.add_key(key)
-                    
-                    # Add to our local list if it's not already there
-                    self.providers[self.current_provider].append(key)
-                    print(f"API key saved for {self.current_provider}")
-                else:
-                    print(f"API key already exists for {self.current_provider}")
-            else:
-                raise ValueError(f"Provider {self.current_provider} not found")
-        except Exception as e:
-            print(f"Error saving API key: {str(e)}")
-            raise
-            
+    def _load_keys_from_storage(self):
+        """Load keys from storage and initialize the first one if available."""
+        # Ensure we're getting fresh keys from storage
+        self.storage = AssemblyKeyStorage()  # Recreate storage instance to ensure fresh data
+        keys = self.storage.get_keys()
+        
+        # Reset the rotation index when keys are loaded
+        self._current_key_index = 0
+        
+        if keys:
+            self.current_api_key = keys[0]
+            self._initialize_provider_with_key(self.current_api_key)
+        else:
+            # Clear current key if no keys in storage
+            self.current_api_key = None
+            # Clear key from provider if no keys
+            if "assemblyai" in self.providers:
+                self.providers["assemblyai"]["module"].settings.api_key = None
+        
+    def _initialize_provider_with_key(self, key):
+        """Set up provider with the current API key."""
+        if "assemblyai" in self.providers:
+            self.providers["assemblyai"]["module"].settings.api_key = key
+
+    def save_key(self, key):
+        """Save an API key and set it as the current key."""
+        self.storage.add_key(key)
+        self.current_api_key = key
+        self._initialize_provider_with_key(key)
+
     def get_keys(self):
-        """Get all API keys as a list."""
-        # Return the list of keys for the current provider
-        return self.providers.get(self.current_provider, [])
-        
+        """Get all stored API keys."""
+        return self.storage.get_keys()
+
     def is_api_key_set(self):
-        """Check if an API key is set for the current provider."""
-        keys = self.providers.get(self.current_provider, [])
-        return len(keys) > 0
-        
+        """Check if an API key is set."""
+        return self.current_api_key is not None
+
     def remove_all_keys(self):
         """Remove all API keys."""
-        try:
-            factory = ApiProviderFactory()
-            
-            for provider_name in self.providers.keys():
-                provider = factory.get_provider(provider_name)
-                if provider:
-                    provider.clear_api_key()
-                self.providers[provider_name] = []  # Reset to empty list
-                
-            print("All API keys removed")
-        except Exception as e:
-            print(f"Error removing API keys: {str(e)}")
-            raise
-            
+        self.storage.remove_all_keys()
+        self.current_api_key = None
+        self._current_key_index = 0  # Reset the rotation index
+        
+        # Clear the key from the provider
+        if "assemblyai" in self.providers:
+            self.providers["assemblyai"]["module"].settings.api_key = None
+
     def set_api_key(self, key):
-        """Legacy method - calls save_key for compatibility."""
-        return self.save_key(key)
+        """Set the current API key."""
+        self.save_key(key)  # This will also save to storage
 
     def get_next_key(self):
-        """Get the next API key in rotation."""
+        """Get the next API key in rotation, cycling through all available keys."""
         keys = self.get_keys()
         if not keys:
             return None
             
-        # Get the next key in rotation
-        next_key = keys[self.current_key_index]
+        # If we have keys, use the one at the current index
+        api_key = keys[self._current_key_index]
         
-        # Update the index for next time (with wrap-around)
-        self.current_key_index = (self.current_key_index + 1) % len(keys)
+        # Update the index for the next request (cycle back to 0 if needed)
+        self._current_key_index = (self._current_key_index + 1) % len(keys)
         
-        return next_key
+        # Print status for debugging
+        print(f"Using AssemblyAI API key {self._current_key_index} of {len(keys)}: {api_key[:4]}...{api_key[-4:]}")
+        
+        # Update the provider with the selected key
+        self._initialize_provider_with_key(api_key)
+        
+        # Store as current key and return
+        self.current_api_key = api_key
+        return api_key
 
 
 class SrtGenerationView(QWidget):
@@ -193,6 +184,13 @@ class SrtGenerationView(QWidget):
             except Exception as e:
                 print(f"Error loading API key from manager: {str(e)}")
         return False
+    
+    def reload_api_keys(self):
+        """Reload API keys from storage - called when switching views"""
+        # Reload keys in the API key manager from storage
+        self.api_key_manager._load_keys_from_storage()
+        # Then load a key into the active property
+        return self._load_api_key_from_manager()
 
     def init_ui(self):
         layout = QVBoxLayout()
@@ -276,7 +274,7 @@ class SrtGenerationView(QWidget):
         layout.addWidget(self.api_key_list)
 
         # Button to remove all API Keys
-        remove_all_keys_btn = QPushButton("Remove All API Keys")
+        remove_all_keys_btn = QPushButton("Remove API Key")
         remove_all_keys_btn.clicked.connect(self._remove_all_api_keys)
         layout.addWidget(remove_all_keys_btn)
 
@@ -300,7 +298,7 @@ class SrtGenerationView(QWidget):
         layout.addLayout(progress_layout)
 
         # Add the 'Generate SRT' button to the bottom of the layout
-        generate_srt_btn = QPushButton("Generate SRT")
+        generate_srt_btn = QPushButton("Generate subtitles")
         generate_srt_btn.clicked.connect(self._generate_srt)
         layout.addWidget(generate_srt_btn)
 
@@ -311,6 +309,12 @@ class SrtGenerationView(QWidget):
 
         self.setLayout(layout)
 
+    def _has_video_extension(self, file_path):
+        """Check if a file has a valid video extension."""
+        video_extensions = ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v']
+        _, ext = os.path.splitext(file_path)
+        return ext.lower() in video_extensions
+    
     def _validate_video_file(self, file_path):
         """Validate that a file is a valid video file."""
         # Check if file exists
@@ -318,9 +322,7 @@ class SrtGenerationView(QWidget):
             return False, "File does not exist"
             
         # Check if file has video extension
-        video_extensions = ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v']
-        _, ext = os.path.splitext(file_path)
-        if ext.lower() not in video_extensions:
+        if not self._has_video_extension(file_path):
             return False, "Not a supported video format"
             
         # Check file size - limit to 1GB
@@ -363,24 +365,37 @@ class SrtGenerationView(QWidget):
     def _handle_dropped_files(self, files: List[str]):
         """Handle dropped video files and folders."""
         all_valid_files = []
-        all_invalid_files = []  # Keep for debugging but don't show to user
+        all_invalid_files = []  # Only contains video files that failed validation
+        any_video_files_found = False  # Track if we found ANY files with video extensions
         
         # Process each dropped item
         for file_path in files:
             if os.path.isdir(file_path):
                 # If it's a directory, scan it for videos
-                valid_files, invalid_files = self._scan_folder_for_videos(file_path)
+                valid_files, invalid_files, has_video_files = self._scan_folder_for_videos(file_path)
                 all_valid_files.extend(valid_files)
                 all_invalid_files.extend(invalid_files)
+                any_video_files_found = any_video_files_found or has_video_files
             else:
-                # If it's a file, validate it directly
-                is_valid, message = self._validate_video_file(file_path)
-                if is_valid:
-                    all_valid_files.append(file_path)
-                else:
-                    all_invalid_files.append(f"{os.path.basename(file_path)}: {message}")
+                # If it's a file, check if it has a video extension
+                if os.path.isfile(file_path) and self._has_video_extension(file_path):
+                    any_video_files_found = True
+                    
+                    # Only validate files with video extensions
+                    is_valid, message = self._validate_video_file(file_path)
+                    if is_valid:
+                        all_valid_files.append(file_path)
+                    else:
+                        all_invalid_files.append(f"{os.path.basename(file_path)}: {message}")
+                # Non-video files are silently ignored
         
-        # Always show messages about invalid files if any exist
+        # First check if any video files were found at all
+        if not any_video_files_found:
+            # No video files found in any of the dropped items
+            QMessageBox.warning(self, "No Videos Found", "No video files were found in the dropped items.")
+            return
+        
+        # Show messages about invalid video files if any exist
         if all_invalid_files:
             # Prepare a user-friendly message with the first few errors
             if len(all_invalid_files) <= 3:
@@ -414,8 +429,6 @@ class SrtGenerationView(QWidget):
             else:
                 QMessageBox.information(self, "Duplicate Files", 
                                        "All files were already added to the list.")
-        elif not all_invalid_files:  # Only show this if there are no files at all (neither valid nor invalid)
-            QMessageBox.warning(self, "No Videos Found", "No valid video files were found in the dropped items.")
 
     def _update_file_list(self):
         """Update the list widget with current video files."""
@@ -427,26 +440,40 @@ class SrtGenerationView(QWidget):
         """Recursively scan a folder for valid video files."""
         valid_files = []
         invalid_files = []
+        any_video_files_found = False
         
         for root, _, files in os.walk(folder_path):
             for file in files:
                 file_path = os.path.join(root, file)
-                is_valid, message = self._validate_video_file(file_path)
-                if is_valid:
-                    valid_files.append(file_path)
-                else:
-                    invalid_files.append(f"{os.path.basename(file_path)}: {message}")
+                
+                # Check if it has a video extension
+                if os.path.isfile(file_path) and self._has_video_extension(file_path):
+                    any_video_files_found = True
+                    
+                    # Only validate files with video extensions
+                    is_valid, message = self._validate_video_file(file_path)
+                    if is_valid:
+                        valid_files.append(file_path)
+                    else:
+                        invalid_files.append(f"{os.path.basename(file_path)}: {message}")
+                # Non-video files are silently ignored
         
-        return valid_files, invalid_files
+        return valid_files, invalid_files, any_video_files_found
 
     def _open_source_folder(self):
         """Open folder dialog to select video files."""
         folder_path = QFileDialog.getExistingDirectory(self, "Select Folder with Video Files")
         if folder_path:
             # Scan the folder for video files
-            valid_files, invalid_files = self._scan_folder_for_videos(folder_path)
+            valid_files, invalid_files, any_video_files_found = self._scan_folder_for_videos(folder_path)
             
-            # Always show messages about invalid files if any exist
+            # First check if any video files were found at all
+            if not any_video_files_found:
+                # No video files found in the selected folder
+                QMessageBox.warning(self, "No Videos Found", "No video files were found in the selected folder.")
+                return
+            
+            # Show messages about invalid video files if any exist
             if invalid_files:
                 # Prepare a user-friendly message with the first few errors
                 if len(invalid_files) <= 3:
@@ -480,8 +507,6 @@ class SrtGenerationView(QWidget):
                 else:
                     QMessageBox.information(self, "Duplicate Files", 
                                            "All files were already added to the list.")
-            elif not invalid_files:  # Only show this if there are no files at all (neither valid nor invalid)
-                QMessageBox.warning(self, "No Videos Found", "No valid video files were found in the selected folder.")
 
     def _remove_selected_file(self):
         """Remove the selected file from the list."""
@@ -1418,82 +1443,155 @@ class SrtGenerationView(QWidget):
         try:
             keys = self.api_key_manager.get_keys()
             
-            # Only show the first key if available
+            # Only display the next key to be used
             if keys:
-                key = keys[0]
-                # Mask the API key for display (show first 4 and last 4 chars)
-                if len(key) > 8:
-                    masked_key = f"{key[:4]}{'*' * (len(key) - 8)}{key[-4:]}"
-                else:
-                    masked_key = "****" 
+                # Get the key that will be used next (at the current index)
+                next_key_index = self.api_key_manager._current_key_index
+                if next_key_index < len(keys):
+                    key = keys[next_key_index]
                     
-                self.api_key_list.addItem(f"AssemblyAI API Key: {masked_key}")
+                    # Mask the API key for display (show first 4 and last 4 chars)
+                    if len(key) > 8:
+                        masked_key = f"{key[:4]}{'*' * (len(key) - 8)}{key[-4:]}"
+                    else:
+                        masked_key = "****" 
+                    
+                    # Add the key to the list with the new format
+                    self.api_key_list.addItem(f"Assembly key: {masked_key}")
             
-            # Update status message
-            if keys:
-                self.api_key = keys[0] if not hasattr(self, 'api_key') or not self.api_key else self.api_key
-                aai.settings.api_key = self.api_key  # Set in AssemblyAI
-                self.status_label.setText("API key loaded. Ready to transcribe.")
+                # Update status message
+                self.api_key = self.api_key_manager.current_api_key
+                if self.api_key:
+                    aai.settings.api_key = self.api_key  # Set in AssemblyAI
+                    self.status_label.setText(f"API key loaded. {len(keys)} keys available for rotation.")
+                else:
+                    self.status_label.setText("API key rotation ready but no key is currently active.")
             else:
                 self.status_label.setText("Please set your AssemblyAI API key first.")
         except Exception as e:
             print(f"Error updating API key list: {str(e)}")
             self.status_label.setText("Error loading API keys.")
 
+    def _validate_api_key_format(self, api_key):
+        """Validate API key format."""
+        return self._is_assembly_key(api_key)
+        
+    def _is_assembly_key(self, key: str) -> bool:
+        """Check if a key follows the AssemblyAI API key format (32-char hex string)."""
+        key = key.strip()
+        # AssemblyAI keys are 32-character hexadecimal strings
+        if len(key) != 32:
+            return False
+        # Check if all characters are hexadecimal
+        try:
+            int(key, 16)
+            return True
+        except ValueError:
+            return False
+            
+    def _is_groq_key(self, key: str) -> bool:
+        """Check if a key follows the Groq API key format."""
+        return key.strip().startswith("gsk_")
+
+    def _is_openrouter_key(self, key: str) -> bool:
+        """Check if a key follows the OpenRouter API key format."""
+        return key.strip().startswith("sk-or-")
+        
+    def _add_assembly_keys(self, keys: list) -> bool:
+        """Add AssemblyAI API keys."""
+        if not keys:
+            return False
+            
+        added = False
+        for key in keys:
+            # Only add the key if it's not already in storage
+            existing_keys = self.api_key_manager.get_keys()
+            if key not in existing_keys:
+                self.api_key_manager.set_api_key(key)
+                added = True
+                
+        if added:
+            # Reload keys to ensure proper rotation setup
+            self.api_key_manager._load_keys_from_storage()
+            # Load the next key to make it active
+            self.api_key = self.api_key_manager.get_next_key()
+            # Update the UI
+            self._update_api_key_list()
+            print(f"Added {len(keys)} AssemblyAI keys, now have {len(self.api_key_manager.get_keys())} keys total")
+            
+        return added
+
+    def _add_groq_keys(self, keys: list) -> bool:
+        """Add Groq API keys."""
+        if not keys:
+            return False
+        added = False
+        try:
+            from ..core.groq_key_storage import GroqKeyStorage
+            groq_storage = GroqKeyStorage()
+            for key in keys:
+                if key not in groq_storage.get_keys():
+                    groq_storage.add_key(key)
+                    added = True
+            return added
+        except ImportError:
+            return False
+
+    def _add_openrouter_keys(self, keys: list) -> bool:
+        """Add OpenRouter API keys."""
+        if not keys:
+            return False
+        added = False
+        try:
+            from ..core.key_storage import KeyStorage
+            openrouter_storage = KeyStorage()  # Remove the "openrouter" parameter
+            for key in keys:
+                if key not in openrouter_storage.get_keys():
+                    openrouter_storage.add_key(key)
+                    added = True
+            return added
+        except ImportError:
+            return False
+
     def _import_api_keys(self):
-        """Handle the import of API keys from a zip file."""
+        """Handle importing API keys for all providers."""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select API Keys File",
             "",
             "ZIP files (*.zip)"
         )
-        
         if not file_path:
             return
-            
         try:
-            # Create key importer with the predefined password
             importer = KeyImporter("ZjcGbbwDjzDDkdL")
-            
-            # Import keys from the zip file
             imported_keys = importer.import_keys_from_zip(file_path)
-            
-            # For import button, we allow multiple keys
-            keys_added = 0
-            
-            # Add each imported key to the manager
-            for key in imported_keys:
-                try:
-                    self.api_key_manager.save_key(key)
-                    keys_added += 1
-                except Exception as e:
-                    print(f"Error saving imported key: {str(e)}")
-            
-            # If at least one key was imported, set the first one as active
-            if keys_added > 0:
-                # Get all keys (including previously existing ones)
-                all_keys = self.api_key_manager.get_keys()
-                if all_keys:
-                    self.api_key = all_keys[0]  # Set first key as active
-                    aai.settings.api_key = self.api_key
-            
-            # Update the key list display (will only show first key)
-            self._update_api_key_list()
-            
-            # Show success message
-            QMessageBox.information(
-                self,
-                "Success",
-                f"Successfully imported API key"
-            )
-            
+            assembly_keys = [key for key in imported_keys if self._is_assembly_key(key)]
+            groq_keys = [key for key in imported_keys if self._is_groq_key(key)]
+            openrouter_keys = [key for key in imported_keys if self._is_openrouter_key(key)]
+            invalid_keys = [key for key in imported_keys if not (self._is_assembly_key(key) or self._is_groq_key(key) or self._is_openrouter_key(key))]
+
+            assembly_added = self._add_assembly_keys(assembly_keys)
+            groq_added = self._add_groq_keys(groq_keys)
+            openrouter_added = self._add_openrouter_keys(openrouter_keys)
+
+            import_summary = []
+            if assembly_added:
+                import_summary.append("Added Assembly API key")
+            if groq_added:
+                import_summary.append("Added Groq API key")
+            if openrouter_added:
+                import_summary.append("Added OpenRouter API key")
+            if len(invalid_keys) > 0:
+                import_summary.append(f"{len(invalid_keys)} invalid keys found")
+
+            if import_summary:
+                message = "\n".join(import_summary)
+                QMessageBox.information(self, "Import Results", message)
+            else:
+                QMessageBox.warning(self, "Import Results", "No valid API keys were found in the file")
         except ValueError as e:
-            QMessageBox.critical(
-                self,
-                "Import Error",
-                str(e)
-            )
+            QMessageBox.critical(self, "Import Error", str(e))
 
     async def _create_transcript(self, audio_path):
         """Create transcript using AssemblyAI"""

@@ -4,9 +4,13 @@ from pathlib import Path
 from typing import List
 
 class KeyStorage:
-    def __init__(self):
+    def __init__(self, provider=None):
         self.config_dir = Path.home() / '.srt_translator'
-        self.config_file = self.config_dir / 'api_keys.json'
+        # Use different file for different providers if specified
+        if provider:
+            self.config_file = self.config_dir / f'{provider}_api_keys.json'
+        else:
+            self.config_file = self.config_dir / 'api_keys.json'
         self._ensure_config_dir()
 
     def _ensure_config_dir(self):
@@ -28,3 +32,14 @@ class KeyStorage:
                 return data.get('api_keys', [])
         except (json.JSONDecodeError, IOError):
             return []
+
+    def get_keys(self) -> List[str]:
+        """Alias for load_keys to maintain API compatibility."""
+        return self.load_keys()
+
+    def add_key(self, key: str) -> None:
+        """Add a new API key if it doesn't already exist."""
+        keys = self.load_keys()
+        if key not in keys:
+            keys.append(key)
+            self.save_keys(keys)

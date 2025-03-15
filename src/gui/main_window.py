@@ -35,6 +35,9 @@ class MainWindow(QMainWindow):
         # Update dark mode state to match the translation view
         self.srt_generation_view.set_dark_mode(self.translation_view.dark_mode_active)
         
+        # Reload API keys to ensure any newly imported keys are loaded
+        self.srt_generation_view.reload_api_keys()
+        
         self.setCentralWidget(self.srt_generation_view)
         self.current_view = self.srt_generation_view
 
