@@ -1463,9 +1463,8 @@ class SrtGenerationView(QWidget):
                 self.api_key = self.api_key_manager.current_api_key
                 if self.api_key:
                     aai.settings.api_key = self.api_key  # Set in AssemblyAI
-                    self.status_label.setText(f"API key loaded. {len(keys)} keys available for rotation.")
-                else:
-                    self.status_label.setText("API key rotation ready but no key is currently active.")
+                    self.status_label.setText(f"API key loaded.")
+                
             else:
                 self.status_label.setText("Please set your AssemblyAI API key first.")
         except Exception as e:

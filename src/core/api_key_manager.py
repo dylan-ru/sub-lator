@@ -38,6 +38,13 @@ class ApiKeyManager:
                 # Save keys after removing
                 self._storage.save_keys(list(self._keys.keys()))
 
+    def mark_key_used(self, key: str) -> None:
+        """Mark a key as recently used."""
+        with self._lock:
+            if key in self._keys:
+                key_info = self._keys[key]
+                key_info.last_used = time()
+
     def get_available_key(self) -> Optional[str]:
         """Get the next available API key that's not in cooldown."""
         if not self._keys:

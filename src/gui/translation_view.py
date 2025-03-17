@@ -1,6 +1,7 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                             QTextEdit, QComboBox, QLabel, QLineEdit, QListWidget,
-                            QMessageBox, QProgressBar, QCheckBox, QFileDialog, QApplication, QFrame)
+                            QMessageBox, QProgressBar, QCheckBox, QFileDialog, QApplication, QFrame,
+                            QDialog, QDialogButtonBox)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMetaObject, Q_ARG, QSize
 import os
 from typing import List, Dict, Optional, Tuple, Any
@@ -36,6 +37,80 @@ SUPPORTED_SUBTITLE_FORMATS = {
     '.txt': 'Plain Text',
     '.sub': 'MicroDVD'
 }
+
+class ScrollableMessageDialog(QDialog):
+    def __init__(self, title, message, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        
+        # Create layout
+        layout = QVBoxLayout(self)
+        
+        # Create text edit widget
+        self.text_edit = QTextEdit()
+        self.text_edit.setReadOnly(True)
+        self.text_edit.setText(message)
+        self.text_edit.setMinimumWidth(400)  # Set minimum width
+        self.text_edit.setMinimumHeight(300)  # Set minimum height
+        layout.addWidget(self.text_edit)
+        
+        # Add OK button
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        button_box.accepted.connect(self.accept)
+        layout.addWidget(button_box)
+        
+        # Apply the current theme
+        if parent and hasattr(parent, 'dark_mode_active') and parent.dark_mode_active:
+            self.apply_dark_theme()
+        else:
+            self.apply_light_theme()
+
+    def apply_dark_theme(self):
+        """Apply dark theme styling to the dialog"""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #121212;
+                color: #e0e0e0;
+            }
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #3d3d3d;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QPushButton {
+                background-color: #2d2d2d;
+                color: #f0f0f0;
+                border: 1px solid #3d3d3d;
+                padding: 5px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #494949;
+            }
+        """)
+
+    def apply_light_theme(self):
+        """Apply light theme styling to the dialog"""
+        self.setStyleSheet("""
+            QTextEdit {
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                padding: 5px;
+                background-color: white;
+            }
+            QPushButton {
+                border-radius: 5px;
+                padding: 5px;
+                border: 1px solid #ccc;
+                background-color: #f8f9fa;
+            }
+            QPushButton:hover {
+                background-color: #e9ecef;
+            }
+        """)
 
 class TranslationView(QWidget):
     # Add signals for thread-safe UI updates
@@ -533,7 +608,7 @@ class TranslationView(QWidget):
                     def status_callback(message):
                         self.update_status.emit(f"{os.path.basename(input_file)}: {message}")
                     
-                    # Handle different translation service implementations (sync vs async)
+                    # Both providers now support async translation with status_callback
                     if self.current_provider == "Groq":
                         # Groq service is async and supports status_callback
                         translated = await self.translation_service.translate(
@@ -542,10 +617,11 @@ class TranslationView(QWidget):
                             status_callback=status_callback
                         )
                     else:
-                        # OpenRouter service is synchronous and doesn't support status_callback
-                        translated = self.translation_service.translate(
+                        # OpenRouter now has an async method with retry logic
+                        translated = await self.translation_services["OpenRouter"].translate_async(
                             translation_prompt,
-                            self.model_combo.currentText()
+                            self.model_combo.currentText(),
+                            status_callback=status_callback
                         )
                     
                     # Check again if translation has been aborted
@@ -599,12 +675,15 @@ class TranslationView(QWidget):
             QMessageBox.warning(self, "Translation Result", "No files were translated. This could be because:\n\n1. An error occurred during translation\n2. The selected model requires payment\n3. The API key is invalid or has expired")
             return
             
-        # Show success message with list of translated files
+        # Create message for the dialog
         message = "Translation completed successfully!\n\nTranslated files:"
         for file in translated_files:
             message += f"\n- {file}"
-            
-        QMessageBox.information(self, "Success", message)
+        
+        # Show scrollable dialog with translation results
+        dialog = ScrollableMessageDialog("Success", message, self)
+        dialog.exec()
+        
         self.update_status.emit("Translation completed successfully")
         
         # Clear the file list

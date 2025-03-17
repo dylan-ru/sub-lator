@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sub-lator"
+version = "0.1.0"
+description = "A subtitle translation application"
+requires-python = ">=3.8"
+dependencies = [
+    "PyQt6",
+    "pyzipper",
+    "requests",
+    "urllib3",
+    "requests-toolbelt",
+    "aiohttp",
+    "python-dotenv",
+    "assemblyai",
+    "PyQt6-WebEngine",
+    "pydub",
+    "pytube",
+    "numpy",
+    "scipy",
+    "whisperx",
+    "torch",
+    "transformers",
+    "pyannote.audio",
+]
+
+[tool.setuptools]
+packages = ["src"] 
