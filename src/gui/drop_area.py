@@ -7,6 +7,7 @@ import os
 
 class DropArea(QLabel):
     filesDropped = pyqtSignal(list)
+    invalidFilesDropped = pyqtSignal(str)  # New signal for invalid files
 
     def __init__(self):
         super().__init__()
@@ -66,27 +67,25 @@ class DropArea(QLabel):
                 event.accept()
             else:
                 event.ignore()
-                QMessageBox.warning(self, "Warning", "Please drop only supported subtitle files (srt, ass, ssa, txt, vtt) or folders.")
+                # Remove warning message here - it will be handled after drop
         else:
             event.ignore()
 
     def dropEvent(self, event: QDropEvent):
         files = []
+        invalid_files = []
         subtitle_extensions = ('.srt', '.ass', '.ssa', '.txt', '.vtt')
         
         for url in event.mimeData().urls():
             local_file = url.toLocalFile()
-            if local_file.lower().endswith(subtitle_extensions):
-                files.append(local_file)  # Add individual subtitle files
-            elif os.path.isdir(local_file):  # Check if it's a directory
-                # List all subtitle files in the directory
-                subtitle_files = [os.path.join(local_file, f) for f in os.listdir(local_file) 
-                                if f.lower().endswith(subtitle_extensions)]
-                files.extend(subtitle_files)  # Add found subtitle files to the list
-                
-                # Check if no subtitle files were found
-                if not subtitle_files:
-                    QMessageBox.warning(self, "Warning", "No subtitle files found in the dropped folder.")
-
+            if local_file.lower().endswith(subtitle_extensions) or os.path.isdir(local_file):
+                files.append(local_file)  # Add both subtitle files and directories directly
+            elif local_file:
+                invalid_files.append(os.path.basename(local_file))
+        
+        # Emit signal for invalid files instead of showing dialog directly
+        if invalid_files:
+            self.invalidFilesDropped.emit("Please drop only supported subtitle files (srt, ass, ssa, txt, vtt) or folders.")
+        
         if files:
             self.filesDropped.emit(files)

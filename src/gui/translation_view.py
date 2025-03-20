@@ -1,6 +1,7 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                             QTextEdit, QComboBox, QLabel, QLineEdit, QListWidget,
-                            QMessageBox, QProgressBar, QCheckBox, QFileDialog, QApplication)
+                            QMessageBox, QProgressBar, QCheckBox, QFileDialog, QApplication,
+                            QDialog)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMetaObject, Q_ARG, QSize
 import os
 from typing import List, Dict, Optional, Tuple
@@ -24,6 +25,76 @@ LANGUAGE_CODES = {
     "Korean": "KR",
     "Chinese": "CN"
 }
+
+class TranslationResultDialog(QDialog):
+    """Dialog to show translation results with a scrollable list of translated files."""
+    def __init__(self, parent=None, translated_files=None, dark_mode=False):
+        super().__init__(parent)
+        self.setWindowTitle("Success")
+        self.setMinimumSize(600, 400)  # Wider and taller dialog
+        
+        # Create layout
+        layout = QVBoxLayout(self)
+        
+        # Header label with icon
+        header_layout = QHBoxLayout()
+        icon_label = QLabel()
+        icon_label.setPixmap(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton).pixmap(32, 32))
+        header_layout.addWidget(icon_label)
+        
+        header_label = QLabel("Translation completed successfully!")
+        header_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        header_layout.addWidget(header_label)
+        header_layout.addStretch()
+        layout.addLayout(header_layout)
+        
+        # Files label
+        files_label = QLabel("Translated files:")
+        layout.addWidget(files_label)
+        
+        # Text edit for file list (scrollable)
+        self.text_edit = QTextEdit()
+        self.text_edit.setReadOnly(True)
+        
+        # Format and add the list of files
+        file_list_text = ""
+        if translated_files:
+            for file in translated_files:
+                file_list_text += f"- {file}\n"
+        self.text_edit.setText(file_list_text)
+        
+        layout.addWidget(self.text_edit)
+        
+        # OK button
+        button_box = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        ok_button.setFixedWidth(100)
+        ok_button.clicked.connect(self.accept)
+        button_box.addStretch()
+        button_box.addWidget(ok_button)
+        layout.addLayout(button_box)
+        
+        # Apply dark mode if needed
+        if dark_mode:
+            self.setStyleSheet("""
+                QDialog { background-color: #121212; color: #e0e0e0; }
+                QLabel { color: #e0e0e0; }
+                QTextEdit { 
+                    background-color: #1e1e1e; 
+                    color: #e0e0e0;
+                    border: 1px solid #3d3d3d;
+                }
+                QPushButton { 
+                    background-color: #2d2d2d; 
+                    color: #f0f0f0;
+                    border: 1px solid #3d3d3d;
+                    padding: 5px;
+                    border-radius: 5px;
+                }
+                QPushButton:hover {
+                    background-color: darkgray;
+                }
+            """)
 
 class TranslationView(QWidget):
     # Add signals for thread-safe UI updates
@@ -146,6 +217,7 @@ class TranslationView(QWidget):
         # Drop area
         self.drop_area = DropArea()
         self.drop_area.filesDropped.connect(self._handle_dropped_files)
+        self.drop_area.invalidFilesDropped.connect(self._handle_invalid_files)
         layout.addWidget(self.drop_area)
 
         # File list section
@@ -193,7 +265,7 @@ class TranslationView(QWidget):
         api_keys_label = QLabel("Active API Keys:")
         api_key_section.addWidget(api_keys_label)
         self.api_keys_list = QListWidget()
-        self.api_keys_list.setMaximumHeight(100)
+        self.api_keys_list.setMaximumHeight(40)  # Reduced height since we only show one key
         api_key_section.addWidget(self.api_keys_list)
 
         # Remove key button
@@ -263,20 +335,56 @@ class TranslationView(QWidget):
         self.output_dir = directory
         self._update_output_label()
 
+    def _find_subtitle_files_recursive(self, directory):
+        """Find all subtitle files in a directory and its subdirectories."""
+        subtitle_extensions = ('.srt', '.ass', '.ssa', '.txt', '.vtt')
+        subtitle_files = []
+        
+        print(f"Searching directory recursively: {directory}")  # Enhanced debug output
+        for root, dirs, files in os.walk(directory):
+            for file in files:
+                if file.lower().endswith(subtitle_extensions):
+                    full_path = os.path.join(root, file)
+                    subtitle_files.append(full_path)
+                    print(f"Found subtitle file: {full_path}")  # Debug each file found
+        
+        print(f"Total subtitle files found: {len(subtitle_files)}")  # Summary debug output
+        return subtitle_files
+
     def _handle_dropped_files(self, files: List[str]):
-        """Handle dropped files or folders."""
+        """Handle dropped files or folders recursively."""
         print("Dropped files/folders:", files)  # Debugging output
         subtitle_extensions = ('.srt', '.ass', '.ssa', '.txt', '.vtt')
+        added_files = False  # Flag to track if any files were added
+        folders_processed = 0  # Counter for processed folders
+        
         for file in files:
             if os.path.isdir(file):  # Check if the dropped item is a directory
-                # List all subtitle files in the directory
-                subtitle_files = [os.path.join(file, f) for f in os.listdir(file) 
-                                if f.lower().endswith(subtitle_extensions)]
-                print("Found subtitle files:", subtitle_files)  # Debugging output
-                self.files.extend(subtitle_files)  # Add found subtitle files to the list
+                folders_processed += 1
+                # Find all subtitle files recursively
+                subtitle_files = self._find_subtitle_files_recursive(file)
+                if subtitle_files:
+                    print(f"Found {len(subtitle_files)} subtitle files in directory tree of {file}")
+                    self.files.extend(subtitle_files)
+                    added_files = True
+                    self.status_label.setText(f"Found {len(subtitle_files)} subtitle files in {os.path.basename(file)}")
+                else:
+                    print(f"No subtitle files found in directory: {file}")
+                    # Only show warning if this is the only folder dropped and no files were added
+                    if folders_processed == len(files) and not added_files:
+                        QMessageBox.warning(self, "Warning", f"No subtitle files found in the dropped folder.")
             elif file.lower().endswith(subtitle_extensions):
+                print(f"Adding individual subtitle file: {file}")
                 self.files.append(file)  # Add individual subtitle files
-        self._update_file_list()  # Update the displayed file list
+                added_files = True
+        
+        # Update the UI with found files
+        if added_files:
+            self._update_file_list()
+        else:
+            print("No files were added")
+            if not folders_processed:  # If no folders were processed, show a different message
+                QMessageBox.warning(self, "Warning", "No valid subtitle files were dropped.")
 
     def _update_file_list(self):
         """Update the list of files to be translated."""
@@ -391,12 +499,14 @@ class TranslationView(QWidget):
             self.update_status.emit("No files were translated")
             return
             
-        # Show success message with list of translated files
-        message = "Translation completed successfully!\n\nTranslated files:"
-        for file in translated_files:
-            message += f"\n- {file}"
-            
-        QMessageBox.information(self, "Success", message)
+        # Use the custom dialog instead of QMessageBox
+        dialog = TranslationResultDialog(
+            self, 
+            translated_files=translated_files, 
+            dark_mode=self.dark_mode_active
+        )
+        dialog.exec()
+        
         self.update_status.emit("Translation completed successfully")
         self.translate_btn.setEnabled(True)
         self._update_key_list()
@@ -434,26 +544,28 @@ class TranslationView(QWidget):
         self._update_key_list()
 
     def _update_key_list(self):
-        # Store the currently selected key
-        current_item = self.api_keys_list.currentItem()
-        selected_key = current_item.text().split(" [")[0] if current_item else None
-        
+        """Update the list of API keys and their statuses, showing only the first key with masking."""
         self.api_keys_list.clear()
-        selected_index = -1
         
-        # Rebuild the list and find the index of the previously selected key
-        for i, key in enumerate(self.translation_service.get_api_keys()):
-            status = self.translation_service.get_key_status(key)
-            if status:
-                cooldown = status["cooldown_remaining"]
-                status_text = "Ready" if status["is_available"] else f"Cooldown: {cooldown:.1f}s"
-                self.api_keys_list.addItem(f"{key} [{status_text}]")
-                if key == selected_key:
-                    selected_index = i
+        keys = self.translation_service.get_api_keys()
+        if not keys:
+            return
+            
+        # Only show the first key
+        key = keys[0]
+        status = self.translation_service.get_key_status(key)
+        masked_key = self._mask_api_key(key)
+        
+        if status:
+            cooldown = status["cooldown_remaining"]
+            status_text = "Ready" if status["is_available"] else f"Cooldown: {cooldown:.1f}s"
+            self.api_keys_list.addItem(f"{masked_key} [{status_text}]")
 
-        # Restore the selection if the key still exists
-        if selected_index >= 0:
-            self.api_keys_list.setCurrentRow(selected_index)
+    def _mask_api_key(self, key):
+        """Mask an API key to show only first 5 and last 3 characters."""
+        if len(key) <= 8:  # If key is too short, just mask most of it
+            return key[:2] + "..." + key[-2:]
+        return key[:5] + "..." + key[-3:]
 
     def _update_key_statuses(self):
         self._update_key_list()
@@ -501,16 +613,17 @@ class TranslationView(QWidget):
             self._update_file_list()
 
     def _open_source_folder(self):
-        """Open the source folder and find srt files."""
+        """Open the source folder and find srt files recursively."""
         folder_path = QFileDialog.getExistingDirectory(self, "Select Source Folder")
         if folder_path:
-            # Analyze the folder for srt files
-            srt_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith('.srt')]
-            if srt_files:
-                self.files.extend(srt_files)
+            # Analyze the folder for subtitle files recursively
+            subtitle_files = self._find_subtitle_files_recursive(folder_path)
+            if subtitle_files:
+                self.files.extend(subtitle_files)
                 self._update_file_list()
+                self.status_label.setText(f"Found {len(subtitle_files)} subtitle files in directory tree")
             else:
-                QMessageBox.warning(self, "Warning", "No .srt files found in the selected folder.")
+                QMessageBox.warning(self, "Warning", "No subtitle files found in the selected folder or its subfolders.")
 
     def toggle_dark_mode(self):
         if not self.dark_mode_active:
@@ -576,3 +689,7 @@ class TranslationView(QWidget):
             self.dark_mode_btn.setText("Dark Mode: OFF")
             self.dark_mode_btn.setIcon(self.moon_icon)
             self.open_source_btn.setFixedSize(QSize(self.default_open_source_btn_size.width() + 5, self.default_open_source_btn_size.height()))
+
+    def _handle_invalid_files(self, message):
+        """Handle invalid files dropped on the drop area."""
+        QTimer.singleShot(100, lambda: QMessageBox.warning(self, "Warning", message))
