@@ -10,6 +10,7 @@ from .drop_area import DropArea
 from ..core.async_utils import run_async, AsyncWorker
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QStyle
+from ..utils.resource_path import resource_path
 
 state = False
 
@@ -117,40 +118,43 @@ class TranslationView(QWidget):
         self.update_progress.connect(self._update_progress_bar)
         self.update_status.connect(self._update_status_label)
         
+        # Get absolute path for CSS stylesheets
+        arrow_dark_path = resource_path('icons/down_arrow_dark.ico').replace('\\', '/')
+        
         # Set default button style
-        self.setStyleSheet("""
-            QPushButton { 
+        self.setStyleSheet(f"""
+            QPushButton {{ 
                 border-radius: 5px;
                 padding: 5px;
                 border: 1px solid #ccc;
-            }
-            QPushButton:hover {
+            }}
+            QPushButton:hover {{
                 background-color: rgb(140, 140, 140);
-            }
-            QComboBox {
+            }}
+            QComboBox {{
                 border-radius: 5px;
                 padding: 8px 25px 8px 8px;
                 border: 1px solid #ccc;
                 min-width: 6em;
-            }
-            QComboBox:hover {
+            }}
+            QComboBox:hover {{
                 background-color: rgb(102, 102, 102);
-            }
-            QComboBox::drop-down {
+            }}
+            QComboBox::drop-down {{
                 border: none;
                 width: 20px;
                 border-radius: 5px;
-            }
-            QComboBox::down-arrow {
-                image: url(src/icons/down_arrow_dark.svg);
+            }}
+            QComboBox::down-arrow {{
+                image: url({arrow_dark_path});
                 width: 12px;
                 height: 12px;
-            }
-            QComboBox QAbstractItemView {
+            }}
+            QComboBox QAbstractItemView {{
                 border: 1px solid #ccc;
                 border-radius: 5px;
                 selection-background-color: #e0e0e0;
-            }
+            }}
         """)
         
         self._init_ui()
@@ -199,8 +203,8 @@ class TranslationView(QWidget):
 
         # Dark mode button
         self.dark_mode_btn = QPushButton("Dark Mode: OFF")  # Store as instance variable
-        self.moon_icon = QIcon(os.path.join('src/icons', 'moon_icon.png'))
-        self.white_moon_icon = QIcon(os.path.join('src/icons', 'white_moon.png'))
+        self.moon_icon = QIcon(resource_path(os.path.join('icons', 'moon_icon.png')))
+        self.white_moon_icon = QIcon(resource_path(os.path.join('icons', 'white_moon.png')))
         self.dark_mode_btn.setIcon(self.moon_icon)
         self.dark_mode_btn.setIconSize(QSize(16, 16))
         self.dark_mode_btn.setStyleSheet("text-align: left;")
@@ -627,53 +631,56 @@ class TranslationView(QWidget):
 
     def toggle_dark_mode(self):
         if not self.dark_mode_active:
-            dark_style = """
-            QWidget { background-color: #121212; color: #e0e0e0; }
-            QPushButton { 
+            # Get absolute path for CSS stylesheets
+            arrow_path = resource_path('icons/down_arrow.ico').replace('\\', '/')
+            
+            dark_style = f"""
+            QWidget {{ background-color: #121212; color: #e0e0e0; }}
+            QPushButton {{ 
                 background-color: #2d2d2d; 
                 color: #f0f0f0;
                 border: 1px solid #3d3d3d;
                 padding: 5px;
                 border-radius: 5px;
-            }
-            QPushButton:hover {
+            }}
+            QPushButton:hover {{
                 background-color: darkgray;
-            }
-            QLineEdit, QTextEdit, QPlainTextEdit, QListWidget, QLabel { 
+            }}
+            QLineEdit, QTextEdit, QPlainTextEdit, QListWidget, QLabel {{ 
                 background-color: #1e1e1e; 
                 color: #e0e0e0; 
-            }
-            QComboBox {
+            }}
+            QComboBox {{
                 background-color: rgb(115, 115, 115);
                 color: #f0f0f0;
                 border: 1px solid #3d3d3d;
                 border-radius: 5px;
                 padding: 8px 25px 8px 8px;
                 min-width: 6em;
-            }
-            QComboBox:hover {
+            }}
+            QComboBox:hover {{
                 background-color: rgb(128, 159, 255);
-            }
-            QComboBox::drop-down {
+            }}
+            QComboBox::drop-down {{
                 border: none;
                 width: 20px;
                 border-radius: 5px;
                 background-color: transparent;
-            }
-            QComboBox::down-arrow {
-                image: url(src/icons/down_arrow.svg);
+            }}
+            QComboBox::down-arrow {{
+                image: url({arrow_path});
                 width: 12px;
                 height: 12px;
-            }
-            QComboBox QAbstractItemView {
+            }}
+            QComboBox QAbstractItemView {{
                 background-color: #2d2d2d;
                 color: #f0f0f0;
                 selection-background-color: #3d3d3d;
                 selection-color: #ffffff;
                 border: 1px solid #3d3d3d;
                 border-radius: 5px;
-            }
-            QMessageBox { background-color: #121212; color: #e0e0e0; }
+            }}
+            QMessageBox {{ background-color: #121212; color: #e0e0e0; }}
             """
             QApplication.instance().setStyleSheet(dark_style)
             self.dark_mode_active = True

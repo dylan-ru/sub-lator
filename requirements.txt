@@ -1,5 +1,5 @@
+# Python 3.7+ required
 PyQt6>=6.4.0
 requests>=2.31.0
-asyncio>=3.4.3
-typing>=3.7.4
-functools>=0.5
+# Optional dependency for Python 3.6 compatibility
+# dataclasses;python_version<"3.7"
