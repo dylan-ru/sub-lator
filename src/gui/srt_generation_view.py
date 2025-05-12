@@ -23,6 +23,7 @@ import asyncio
 from ..core.groq_key_storage import GroqKeyStorage
 from ..core.key_storage import KeyStorage
 from ..core.assembly_key_storage import AssemblyKeyStorage
+from ..utils.resource_path import resource_path
 
 # Conditionally import PyQt6.QtMultimedia - it might not be installed
 has_qt_multimedia = False
@@ -250,7 +251,7 @@ class SrtGenerationView(QWidget):
         self.import_key_btn = QPushButton()
         upload_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)
         self.import_key_btn.setIcon(upload_icon)
-        self.import_key_btn.setToolTip("Import API Keys")
+        self.import_key_btn.setToolTip("Import API Key")
         self.import_key_btn.clicked.connect(self._import_api_keys)
         self.import_key_btn.setFixedSize(30, 30)
         api_key_layout.addWidget(self.import_key_btn)
@@ -2005,124 +2006,128 @@ class SrtGenerationView(QWidget):
         """Set dark mode for the SRT generation view"""
         self.dark_mode_active = enabled
         
+        # Get absolute paths to arrow images using resource_path
+        dark_arrow_path = resource_path('src/icons/down_arrow_white.svg').replace('\\', '/')
+        light_arrow_path = resource_path('src/icons/down_arrow_dark.svg').replace('\\', '/')
+        
         # Apply dark mode to the drop area
         if hasattr(self, 'drop_area'):
             self.drop_area.set_dark_mode(enabled)
             
         # Apply dark mode to the file list and other components
         if enabled:
-            self.setStyleSheet("""
-                QWidget#SrtGenerationView {
+            self.setStyleSheet(f"""
+                QWidget#SrtGenerationView {{
                     background-color: #121212;
                     color: #e0e0e0;
-                }
-                QListWidget {
+                }}
+                QListWidget {{
                     background-color: #1e1e1e;
                     color: #e0e0e0;
                     border: 1px solid #3d3d3d;
-                }
-                QPushButton {
+                }}
+                QPushButton {{
                     background-color: #2d2d2d;
                     color: #f0f0f0;
                     border: 1px solid #3d3d3d;
                     padding: 5px;
                     border-radius: 5px;
-                }
-                QPushButton:hover {
+                }}
+                QPushButton:hover {{
                     background-color: #3d3d3d;
-                }
-                QLineEdit, QTextEdit, QPlainTextEdit, QLabel {
+                }}
+                QLineEdit, QTextEdit, QPlainTextEdit, QLabel {{
                     background-color: #1e1e1e;
                     color: #e0e0e0;
                     border: 1px solid #3d3d3d;
-                }
-                QComboBox {
+                }}
+                QComboBox {{
                     background-color: #1e1e1e;
                     color: #e0e0e0;
                     border: 1px solid #3d3d3d;
                     border-radius: 5px;
                     padding: 8px 25px 8px 8px;
-                }
-                QComboBox:hover {
+                }}
+                QComboBox:hover {{
                     background-color: #3d3d3d;
-                }
-                QComboBox::drop-down {
+                }}
+                QComboBox::drop-down {{
                     border: none;
                     width: 20px;
                     border-radius: 5px;
                     background-color: transparent;
-                }
-                QComboBox::down-arrow {
-                    image: url(src/icons/down_arrow_white.svg);
+                }}
+                QComboBox::down-arrow {{
+                    image: url({dark_arrow_path});
                     width: 12px;
                     height: 12px;
-                }
-                QComboBox QAbstractItemView {
+                }}
+                QComboBox QAbstractItemView {{
                     background-color: #2d2d2d;
                     color: #f0f0f0;
                     selection-background-color: #3d3d3d;
                     selection-color: #ffffff;
                     border: 1px solid #3d3d3d;
                     border-radius: 5px;
-                }
+                }}
             """)
         else:
             # Light mode styling
-            self.setStyleSheet("""
-                QPushButton { 
+            self.setStyleSheet(f"""
+                QPushButton {{ 
                     border-radius: 5px;
                     padding: 5px;
                     border: 1px solid #ccc;
                     background-color: #f8f9fa;
-                }
-                QPushButton:hover {
+                }}
+                QPushButton:hover {{
                     background-color: #e9ecef;
-                }
-                QListWidget {
+                }}
+                QListWidget {{
                     border: 1px solid #ddd;
                     border-radius: 5px;
                     background-color: white;
-                }
-                QLineEdit, QTextEdit, QPlainTextEdit {
+                }}
+                QLineEdit, QTextEdit, QPlainTextEdit {{
                     border: 1px solid #ccc;
                     border-radius: 5px;
                     padding: 5px;
                     background-color: white;
-                }
-                QComboBox {
+                }}
+                QComboBox {{
                     border-radius: 5px;
                     padding: 8px 25px 8px 8px;
                     border: 1px solid #ccc;
                     min-width: 6em;
                     background-color: white;
-                }
-                QComboBox:hover {
+                }}
+                QComboBox:hover {{
                     background-color: #f0f0f0;
-                }
-                QComboBox::drop-down {
+                }}
+                QComboBox::drop-down {{
                     border: none;
                     width: 20px;
                     border-radius: 5px;
-                }
-                QComboBox::down-arrow {
-                    image: url(src/icons/down_arrow_dark.svg);
+                }}
+                QComboBox::down-arrow {{
+                    image: url({light_arrow_path});
                     width: 12px;
                     height: 12px;
-                }
-                QComboBox QAbstractItemView {
+                }}
+                QComboBox QAbstractItemView {{
                     border: 1px solid #ccc;
                     border-radius: 5px;
                     selection-background-color: #e0e0e0;
-                }
-                QProgressBar {
+                }}
+                QProgressBar {{
                     border: 1px solid #ccc;
                     border-radius: 3px;
                     text-align: center;
-                }
-                QProgressBar::chunk {
+                }}
+                QProgressBar::chunk {{
                     background-color: #4CAF50;
                     width: 10px;
-                }
+                }}
             """)
 
     def _update_time_remaining(self):

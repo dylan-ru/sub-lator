@@ -168,3 +168,6 @@ class ProcessTimeTracker:
             "estimated_remaining_time": self.estimate_remaining_time()
         }
         return stats 
+
+# Create an alias so that code importing TimeTracker will work
+TimeTracker = ProcessTimeTracker 

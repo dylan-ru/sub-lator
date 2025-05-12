@@ -13,6 +13,7 @@ from ..core.async_utils import run_async, AsyncWorker
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QStyle
 from ..core.api_provider import ApiProviderFactory
+from ..utils.resource_path import resource_path
 
 state = False
 
@@ -295,7 +296,7 @@ class TranslationView(QWidget):
         self.import_key_btn = QPushButton()
         upload_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)
         self.import_key_btn.setIcon(upload_icon)
-        self.import_key_btn.setToolTip("Import API Keys")
+        self.import_key_btn.setToolTip("Import API Key")
         self.import_key_btn.clicked.connect(self._import_api_keys)
         self.import_key_btn.setFixedSize(QSize(30, 30))
         api_key_input_layout.addWidget(self.import_key_btn)
@@ -312,7 +313,7 @@ class TranslationView(QWidget):
         api_key_section.addLayout(api_key_input_layout)
 
         # API Keys list
-        api_keys_label = QLabel("Active API Keys:")
+        api_keys_label = QLabel("Active API Key:")
         api_key_section.addWidget(api_keys_label)
         self.api_keys_list = QListWidget()
         self.api_keys_list.setMaximumHeight(100)
@@ -915,84 +916,88 @@ class TranslationView(QWidget):
                 QMessageBox.warning(self, "Warning", "No subtitle files found in the selected folder.")
 
     def toggle_dark_mode(self):
+        # Get absolute paths to arrow images using resource_path
+        dark_arrow_path = resource_path('src/icons/down_arrow_white.svg').replace('\\', '/')
+        light_arrow_path = resource_path('src/icons/down_arrow_dark.svg').replace('\\', '/')
+
         if not self.dark_mode_active:
-            # Define the dark mode stylesheet
-            dark_style = """
-            QWidget { background-color: #121212; color: #e0e0e0; }
-            QPushButton { 
+            # Define the dark mode stylesheet with dynamic arrow path
+            dark_style = f"""
+            QWidget {{ background-color: #121212; color: #e0e0e0; }}
+            QPushButton {{ 
                 background-color: #2d2d2d !important; 
                 color: #f0f0f0;
                 border: 1px solid #3d3d3d;
                 padding: 5px;
                 border-radius: 5px;
-            }
-            QPushButton:hover {
+            }}
+            QPushButton:hover {{
                 background-color: #494949 !important;
-            }
-            QPushButton:pressed { 
+            }}
+            QPushButton:pressed {{ 
                 background-color: #555555 !important;
-            }
-            QLineEdit { 
+            }}
+            QLineEdit {{ 
                 background-color: #1e1e1e; 
                 color: #e0e0e0; 
                 border: 1px solid #3d3d3d;
                 border-radius: 5px;
                 padding: 5px;
-            }
-            QTextEdit, QPlainTextEdit { 
+            }}
+            QTextEdit, QPlainTextEdit {{ 
                 background-color: #1e1e1e; 
                 color: #e0e0e0;
                 border: 1px solid #3d3d3d;
-            }
-            QListWidget, QLabel { 
+            }}
+            QListWidget, QLabel {{ 
                 background-color: #1e1e1e; 
                 color: #e0e0e0;
                 border: 1px solid #3d3d3d;
                 border-radius: 5px;
                 padding: 2px;
-            }
-            QComboBox {
+            }}
+            QComboBox {{
                 background-color: rgb(115, 115, 115);
                 color: #f0f0f0;
                 border: 1px solid #3d3d3d;
                 border-radius: 5px;
                 padding: 8px 25px 8px 8px;
                 min-width: 6em;
-            }
-            QComboBox:hover {
+            }}
+            QComboBox:hover {{
                 background-color: rgb(73, 73, 73);
-            }
-            QComboBox::drop-down {
+            }}
+            QComboBox::drop-down {{
                 border: none;
                 width: 20px;
                 border-radius: 5px;
                 background-color: transparent;
-            }
-            QComboBox::down-arrow {
-                image: url(src/icons/down_arrow_white.svg);
+            }}
+            QComboBox::down-arrow {{
+                image: url({dark_arrow_path});
                 width: 12px;
                 height: 12px;
-            }
-            QComboBox QAbstractItemView {
+            }}
+            QComboBox QAbstractItemView {{
                 background-color: #2d2d2d;
                 color: #f0f0f0;
                 selection-background-color: #3d3d3d;
                 selection-color: #ffffff;
                 border: 1px solid #3d3d3d;
                 border-radius: 5px;
-            }
-            QMessageBox { background-color: #121212; color: #e0e0e0; }
-            QProgressBar {
+            }}
+            QMessageBox {{ background-color: #121212; color: #e0e0e0; }}
+            QProgressBar {{
                 border: 1px solid #3d3d3d;
                 border-radius: 3px;
                 background-color: #1e1e1e;
                 text-align: center;
                 color: #e0e0e0;
-            }
-            QProgressBar::chunk {
+            }}
+            QProgressBar::chunk {{
                 background-color: #4CAF50;
                 width: 10px;
-            }
+            }}
             """
             # Apply the dark mode stylesheet
             QApplication.instance().setStyleSheet(dark_style)
@@ -1003,64 +1008,64 @@ class TranslationView(QWidget):
             self.dark_mode_btn.setIcon(self.white_moon_icon)
             self.open_source_btn.setFixedSize(QSize(self.default_open_source_btn_size.width() + 5, self.default_open_source_btn_size.height() + 2))
         else:
-            # Define the light mode stylesheet
-            light_style = """
-            QPushButton { 
+            # Define the light mode stylesheet with dynamic arrow path
+            light_style = f"""
+            QPushButton {{ 
                 border-radius: 5px;
                 padding: 5px;
                 border: 1px solid #ccc;
                 background-color: #f8f9fa;
-            }
-            QPushButton:hover {
+            }}
+            QPushButton:hover {{
                 background-color: #e9ecef;
-            }
-            QPushButton:pressed {
+            }}
+            QPushButton:pressed {{
                 background-color: #dee2e6;
-            }
-            QComboBox {
+            }}
+            QComboBox {{
                 border-radius: 5px;
                 padding: 8px 25px 8px 8px;
                 border: 1px solid #ccc;
                 min-width: 6em;
-            }
-            QComboBox:hover {
+            }}
+            QComboBox:hover {{
                 background-color: rgb(217, 217, 217);
-            }
-            QComboBox::drop-down {
+            }}
+            QComboBox::drop-down {{
                 border: none;
                 width: 20px;
                 border-radius: 5px;
-            }
-            QComboBox::down-arrow {
-                image: url(src/icons/down_arrow_dark.svg);
+            }}
+            QComboBox::down-arrow {{
+                image: url({light_arrow_path});
                 width: 12px;
                 height: 12px;
-            }
-            QComboBox QAbstractItemView {
+            }}
+            QComboBox QAbstractItemView {{
                 border: 1px solid #ccc;
                 border-radius: 5px;
                 selection-background-color: #e0e0e0;
-            }
-            QListWidget {
+            }}
+            QListWidget {{
                 border: 1px solid #ccc;
                 border-radius: 5px;
                 padding: 2px;
-            }
-            QLineEdit {
+            }}
+            QLineEdit {{
                 border: 1px solid #ccc;
                 border-radius: 5px;
                 padding: 5px;
                 background-color: white;
-            }
-            QProgressBar {
+            }}
+            QProgressBar {{
                 border: 1px solid #ccc;
                 border-radius: 3px;
                 text-align: center;
-            }
-            QProgressBar::chunk {
+            }}
+            QProgressBar::chunk {{
                 background-color: #4CAF50;
                 width: 10px;
-            }
+            }}
             """
             
             # Apply the light mode stylesheet

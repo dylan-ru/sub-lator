@@ -3,13 +3,14 @@ from PyQt6.QtGui import QIcon
 import os
 from .translation_view import TranslationView
 from .srt_generation_view import SrtGenerationView
+from src.utils.resource_path import resource_path
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("SRT File Translator")
         self.setMinimumSize(800, 600)
-        self.setWindowIcon(QIcon(os.path.join('src/icons', 'icon.png')))
+        self.setWindowIcon(QIcon(resource_path(os.path.join('src/icons', 'icon.png'))))
         
         # Initialize views
         self.translation_view = TranslationView()
