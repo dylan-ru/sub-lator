@@ -12,8 +12,3 @@ pydub
 pytube
 numpy
 scipy
-# Added for WhisperX integration
-whisperx
-torch
-transformers
-pyannote.audio

@@ -79,7 +79,7 @@ class OpenRouterProvider(ApiProvider):
             "anthropic/claude-3-opus",
             "anthropic/claude-3-sonnet",
             "meta-llama/llama-3-70b-instruct",
-            "google/gemini-pro"
+            "google/gemini-2.0-flash-exp"
         ]
     
     def get_api_key(self) -> Optional[str]:

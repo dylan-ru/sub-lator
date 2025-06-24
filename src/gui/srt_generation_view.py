@@ -17,8 +17,9 @@ import struct
 import math
 from PyQt6.QtCore import QUrl, QCoreApplication  # type: ignore
 import time
-from ..core.subtitle_synchronizer import SubtitleSynchronizer  # Legacy synchronizer
-from ..core.whisper_synchronizer import WhisperSynchronizer  # New WhisperX-based synchronizer
+from ..core.subtitle_synchronizer import SubtitleSynchronizer
+from ..core.audio_extractor import extract_audio
+from ..core.subtitle_formatter import to_srt, to_ts, to_ass
 import asyncio
 from ..core.groq_key_storage import GroqKeyStorage
 from ..core.key_storage import KeyStorage
@@ -142,7 +143,6 @@ class SrtGenerationView(QWidget):
         self.current_video_index = 0  # Index of the current video being processed
         self.worker_thread = None  # Worker thread for transcription
         self.cancel_requested = False  # Flag to cancel processing
-        self.whisper_sync = None  # WhisperX synchronizer
         self.temp_audio_files = []  # Temporary audio files to clean up
         self.current_audio_file = None  # Current audio file being processed
         self.current_audio_duration = None  # Duration of the current audio in seconds
@@ -801,13 +801,6 @@ class SrtGenerationView(QWidget):
     def _cleanup_current_video_resources(self):
         """Clean up resources for the current video before processing next"""
         try:
-            # Clean up WhisperX resources if needed
-            if self.whisper_sync:
-                try:
-                    self.whisper_sync._cleanup_gpu()
-                except Exception as e:
-                    print(f"Error cleaning up WhisperX: {str(e)}")
-            
             # Clean up current audio file
             if self.current_audio_file and os.path.exists(self.current_audio_file):
                 try:
@@ -1060,7 +1053,10 @@ class SrtGenerationView(QWidget):
                 self.time_tracker.start_phase('srt_generation', video_file, video_duration)
             
             srt_path = self._get_srt_path(video_file)
-            srt_content = self._format_srt(transcript, self.current_audio_duration)
+            
+            # Use the imported formatter function directly with the full transcript
+            # This preserves all timing information from AssemblyAI for better synchronization
+            srt_content = to_srt(transcript)
             
             # Save SRT file
             with open(srt_path, 'w', encoding='utf-8') as f:
@@ -1179,13 +1175,7 @@ class SrtGenerationView(QWidget):
         # Clean up any temporary files
         self._cleanup_temp_files()
         
-        # Clean up WhisperX synchronizer if it exists
-        if self.whisper_sync:
-            try:
-                self.whisper_sync._cleanup_gpu()
-                self.whisper_sync = None
-            except Exception as e:
-                print(f"Error cleaning up WhisperX synchronizer: {str(e)}")
+        # No need for additional cleanup
         
         # Run base class closeEvent to ensure proper Qt cleanup
         super().closeEvent(event)
@@ -1195,7 +1185,7 @@ class SrtGenerationView(QWidget):
         return os.path.splitext(video_path)[0] + '.srt'
     
     def _format_srt(self, utterances, video_duration=None):
-        """Format utterances into SRT format with WhisperX synchronization."""
+        """Format utterances into SRT format."""
         if not utterances:
             print("No utterances provided for SRT formatting")
             return "1\n00:00:00,000 --> 00:00:05,000\nNo transcription available.\n"
@@ -1221,7 +1211,7 @@ class SrtGenerationView(QWidget):
             except Exception as e:
                 print(f"Error detecting duration from audio file: {str(e)}")
         
-        # CRITICAL FIX: If we have a known duration from the audio file, use it to scale timestamps
+        # If we have a known duration from the audio file, use it to scale timestamps
         subtitle_intervals = [(utterance.start, utterance.end) for utterance in utterances]
         subtitle_texts = [utterance.text for utterance in utterances]
         
@@ -1245,61 +1235,20 @@ class SrtGenerationView(QWidget):
                 print(f"Max timestamp: {max_initial_timestamp:.2f}s, Audio duration: {video_duration:.2f}s")
                 force_scaling = True
         
-        # Apply pre-scaling if timestamps are way off (more than 1 hour for a short video)
+        # Apply scaling if timestamps are way off (more than 1 hour for a short video)
         # or if we detect a significant difference from the known duration
         if max_initial_timestamp > 3600 or force_scaling:
-            print("Applying pre-synchronization scaling to fix timestamp issues")
+            print("Applying scaling to fix timestamp issues")
             
             # If we have a known duration, scale to it, otherwise use a reasonable default
             scaling_target = video_duration if video_duration else 60  # Default to 1 minute if unknown
             scale_factor = scaling_target / max_initial_timestamp
             subtitle_intervals = [(start * scale_factor, end * scale_factor) 
                                  for start, end in subtitle_intervals]
-            print(f"Pre-scaled timestamps by factor of {scale_factor:.6f}")
-            
-        # Initialize WhisperX synchronizer if we have an audio file
-        sync_successful = False
-        aligned_intervals = None
+            print(f"Scaled timestamps by factor of {scale_factor:.6f}")
         
-        # Try to use WhisperX for better alignment if audio file is available
-        if self.current_audio_file and os.path.exists(self.current_audio_file):
-            try:
-                print(f"Synchronizing subtitles with audio using WhisperX...")
-                
-                # Initialize WhisperX synchronizer if needed
-                if not self.whisper_sync:
-                    print("Initializing WhisperSynchronizer...")
-                    self.whisper_sync = WhisperSynchronizer(model_size="base")
-                
-                # Use our stored audio duration if available
-                if not video_duration and hasattr(self, 'current_audio_duration') and self.current_audio_duration:
-                    print(f"Using detected audio duration: {self.current_audio_duration:.2f}s")
-                    video_duration = self.current_audio_duration
-                
-                # Run synchronization
-                aligned_intervals = self.whisper_sync.synchronize(
-                    self.current_audio_file,
-                    subtitle_intervals,
-                    subtitle_texts,
-                    video_duration
-                )
-                
-                if aligned_intervals and len(aligned_intervals) == len(subtitle_texts):
-                    sync_successful = True
-                    print("WhisperX synchronization successful!")
-                else:
-                    print("WhisperX synchronization failed or returned incorrect number of intervals")
-                    
-            except Exception as e:
-                print(f"Error during WhisperX synchronization: {str(e)}")
-                import traceback
-                traceback.print_exc()
-                # Continue with original intervals
-        else:
-            print("No audio file available for synchronization, using original timing")
-        
-        # Use aligned intervals if available, otherwise use original intervals
-        intervals_to_use = aligned_intervals if sync_successful else subtitle_intervals
+        # Use the subtitle intervals directly
+        intervals_to_use = subtitle_intervals
         
         # Final validation: Perform an emergency check for unreasonable timestamps
         # This is our last defense against extreme timestamp values
@@ -1636,22 +1585,9 @@ class SrtGenerationView(QWidget):
             print(f"Transcript type: {type(transcript)}")
             print(f"Transcript attributes: {dir(transcript)}")
             
-            # Check for utterances or similar structure in the transcript
-            if hasattr(transcript, 'utterances') and transcript.utterances:
-                print(f"Found {len(transcript.utterances)} utterances")
-                return transcript.utterances
-            elif hasattr(transcript, 'words') and transcript.words:
-                print(f"Found {len(transcript.words)} words, converting to utterances format")
-                # Convert words to utterance-like format if needed
-                return self._convert_words_to_utterances(transcript.words)
-            else:
-                print("No utterances or words found in transcript")
-                # Try to access transcript text directly
-                if hasattr(transcript, 'text') and transcript.text:
-                    print("Found transcript text, creating utterances from sentences")
-                    sentences = self._split_text_into_sentences(transcript.text)
-                    return [SimpleUtterance(text=s) for s in sentences]
-                return None
+            # Return the full transcript object to preserve all timing information
+            return transcript
+            
         except Exception as e:
             print(f"Error creating transcript: {str(e)}")
             import traceback
@@ -1766,48 +1702,45 @@ class SrtGenerationView(QWidget):
             QCoreApplication.processEvents()
 
     async def _extract_audio(self, video_path):
-        """Extract audio from video file."""
+        """Extract audio from video file using the audio_extractor module."""
         try:
             print(f"Extracting audio from {video_path}")
             self.status_label.setText(f"Extracting audio from {os.path.basename(video_path)}...")
             QCoreApplication.processEvents()  # Force UI update
             
-            # Get output path for the audio file
-            output_dir = os.path.dirname(video_path)
-            output_filename = os.path.splitext(os.path.basename(video_path))[0] + '.wav'
-            output_path = os.path.join(output_dir, output_filename)
+            # Create a unique temp file name
+            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "temp")
+            os.makedirs(temp_dir, exist_ok=True)
             
-            # Optimized ffmpeg command to extract audio - use higher bitrate for better quality
-            ffmpeg_cmd = [
-                'ffmpeg', '-i', video_path, 
-                '-vn',  # No video
-                '-acodec', 'pcm_s16le',  # Convert to WAV
-                '-ar', '16000',  # 16kHz sample rate (optimal for speech recognition)
-                '-ac', '1',  # Mono
-                '-y',  # Overwrite output file if it exists
-                '-loglevel', 'error',  # Reduce logging output for performance
-                output_path
-            ]
+            # Create a unique filename based on the original video name
+            base_name = os.path.splitext(os.path.basename(video_path))[0]
+            output_path = os.path.join(temp_dir, f"{base_name}_{int(time.time())}.wav")
             
-            # Execute ffmpeg
-            print(f"Running ffmpeg: {' '.join(ffmpeg_cmd)}")
-            process = await asyncio.create_subprocess_exec(
-                *ffmpeg_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+            # Store the current audio file path
+            self.current_audio_file = output_path
+            
+            # Define progress and status callbacks
+            def progress_callback(progress):
+                self.progress_bar.setValue(progress)
+                QCoreApplication.processEvents()  # Force UI update
+                
+            def status_callback(message):
+                self.status_label.setText(message)
+                QCoreApplication.processEvents()  # Force UI update
+            
+            # Start extraction in a thread
+            extraction_thread = extract_audio(
+                video_path,
+                output_path,
+                progress_callback=progress_callback,
+                status_callback=status_callback
             )
             
-            # Wait for the process to complete
-            stdout, stderr = await process.communicate()
+            # Wait for extraction to complete
+            while extraction_thread.is_alive():
+                await asyncio.sleep(0.1)
+                QCoreApplication.processEvents()  # Process UI events while waiting
             
-            # Check if process was successful
-            if process.returncode != 0:
-                error_msg = stderr.decode() if stderr else "Unknown ffmpeg error"
-                print(f"Error extracting audio: {error_msg}")
-                self.status_label.setText(f"Error extracting audio: {error_msg}")
-                QCoreApplication.processEvents()  # Force UI update
-                return None
-                
             # Get the duration of the audio file
             if os.path.exists(output_path):
                 try:

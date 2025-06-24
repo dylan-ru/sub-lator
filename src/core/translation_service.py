@@ -36,12 +36,9 @@ class OpenRouterTranslationService(TranslationService):
         self.base_url = "https://openrouter.ai/api/v1"
         self.api_key_manager = ApiKeyManager()
         self.available_models = [
-            "google/gemini-2.0-flash-thinking-exp:free",
-            "anthropic/claude-3-opus",
-            "anthropic/claude-3-sonnet",
-            "google/gemini-pro",
-            "qwen/qwen2.5-vl-72b-instruct:free",
-            "deepseek/deepseek-r1-distill-llama-70b:free"
+            "google/gemini-2.0-flash-exp:free",
+            "mistralai/devstral-small:free",
+            "deepseek/deepseek-chat:free"
         ]
         self.max_retries = 5  # Maximum number of retry attempts for rate limits
 
