@@ -76,21 +76,12 @@ class DropArea(QLabel):
     def dropEvent(self, event: QDropEvent):
         files = []
         for url in event.mimeData().urls():
+            # Just collect the file paths without processing or scanning
             local_file = url.toLocalFile()
-            if any(local_file.lower().endswith(ext) for ext in self.SUPPORTED_SUBTITLE_FORMATS):
-                files.append(local_file)  # Add individual subtitle files
-            elif os.path.isdir(local_file):  # Check if it's a directory
-                # List all subtitle files in the directory
-                subtitle_files = []
-                for root, _, filenames in os.walk(local_file):
-                    for filename in filenames:
-                        if any(filename.lower().endswith(ext) for ext in self.SUPPORTED_SUBTITLE_FORMATS):
-                            subtitle_files.append(os.path.join(root, filename))
-                files.extend(subtitle_files)  # Add found subtitle files to the list
+            files.append(local_file)
                 
-                # Check if no subtitle files were found
-                if not subtitle_files:
-                    QMessageBox.warning(self, "Warning", "No subtitle files found in the dropped folder.")
-
+        # Emit the raw file paths for async processing
         if files:
             self.filesDropped.emit(files)
+            
+        event.acceptProposedAction()

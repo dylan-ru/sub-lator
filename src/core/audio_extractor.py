@@ -88,9 +88,41 @@ def extract_audio(video_path, audio_path, progress_callback=None, status_callbac
             if status_callback:
                 status_callback("Audio extraction complete")
     
-    # Start reading output in a separate thread
-    thread = threading.Thread(target=read_output)
-    thread.daemon = True
+    # Create a custom thread with terminate method
+    class ExtractionThread(threading.Thread):
+        def __init__(self, target):
+            super().__init__(target=target)
+            self.daemon = True
+            self.process = process
+            self.cancelled = False
+            
+        def terminate(self):
+            """Terminate the ffmpeg process"""
+            if self.process:
+                try:
+                    self.cancelled = True
+                    # On Windows, use taskkill to forcefully terminate the process
+                    if os.name == 'nt':
+                        subprocess.run(['taskkill', '/F', '/T', '/PID', str(self.process.pid)], 
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    else:
+                        # On Unix-like systems, use regular termination
+                        self.process.terminate()
+                        # Give it a moment to terminate
+                        self.process.wait(timeout=1)
+                        # If not terminated, kill it
+                        if self.process.poll() is None:
+                            self.process.kill()
+                    
+                    print(f"Terminated ffmpeg process with PID {self.process.pid}")
+                    return True
+                except Exception as e:
+                    print(f"Error terminating ffmpeg process: {str(e)}")
+                    return False
+            return False
+    
+    # Start reading output in a custom thread
+    thread = ExtractionThread(target=read_output)
     thread.start()
     
-    return thread  # Return the thread so caller can join it if needed 
+    return thread  # Return the thread so caller can terminate it if needed 

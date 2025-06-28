@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                          QListWidget, QMessageBox, QFileDialog, QLineEdit, QStyle, QComboBox,
-                         QProgressBar, QCheckBox, QFrame)
+                         QProgressBar, QCheckBox, QFrame, QApplication)
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer  # type: ignore
 import os
 from typing import List, Optional, Tuple, Dict, Any
@@ -129,6 +129,8 @@ class ApiKeyManager:
 
 class SrtGenerationView(QWidget):
     switch_to_translation = pyqtSignal()  # Signal to switch back to translation view
+    update_status = pyqtSignal(str)  # Signal to update status label from any thread
+    files_processed = pyqtSignal(list, list, bool)  # Signal for processed files (valid_files, invalid_files, any_found)
     
     # Define file size limit constant - 1GB in bytes
     FILE_SIZE_LIMIT = 1 * 1024 * 1024 * 1024
@@ -142,6 +144,7 @@ class SrtGenerationView(QWidget):
         self.video_files = []  # List of video files to be processed
         self.current_video_index = 0  # Index of the current video being processed
         self.worker_thread = None  # Worker thread for transcription
+        self.extraction_thread = None  # Thread for audio extraction
         self.cancel_requested = False  # Flag to cancel processing
         self.temp_audio_files = []  # Temporary audio files to clean up
         self.current_audio_file = None  # Current audio file being processed
@@ -158,6 +161,10 @@ class SrtGenerationView(QWidget):
         
         # API key manager
         self.api_key_manager = ApiKeyManager()
+        
+        # Connect signals to slots
+        self.update_status.connect(self._update_status_label)
+        self.files_processed.connect(self._handle_processed_files)
         
         # Set up the user interface
         self.init_ui()
@@ -295,12 +302,26 @@ class SrtGenerationView(QWidget):
         self.progress_bar = QProgressBar()
         progress_layout.addWidget(self.progress_label)
         progress_layout.addWidget(self.progress_bar)
+        
+        # Add time remaining label
+        self.time_remaining_label = QLabel("Time Remaining: --")
+        progress_layout.addWidget(self.time_remaining_label)
+        
         layout.addLayout(progress_layout)
 
-        # Add the 'Generate SRT' button to the bottom of the layout
-        generate_srt_btn = QPushButton("Generate subtitles")
-        generate_srt_btn.clicked.connect(self._generate_srt)
-        layout.addWidget(generate_srt_btn)
+        # Add the 'Generate SRT' and 'Cancel' buttons in a horizontal layout
+        buttons_layout = QHBoxLayout()
+        self.generate_srt_btn = QPushButton("Generate subtitles")
+        self.generate_srt_btn.clicked.connect(self._generate_srt)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self._cancel_operation)
+        self.cancel_btn.setEnabled(False)  # Initially disabled
+
+        buttons_layout.addStretch()
+        buttons_layout.addWidget(self.generate_srt_btn)
+        buttons_layout.addWidget(self.cancel_btn)
+        buttons_layout.addStretch()
+        layout.addLayout(buttons_layout)
 
         # Status label
         self.status_label = QLabel("")
@@ -362,20 +383,64 @@ class SrtGenerationView(QWidget):
         # Return count of new files added
         return len(new_files)
 
+    def _show_loading_indicator(self, visible=True):
+        """Show or hide a loading indicator."""
+        if not hasattr(self, 'loading_indicator'):
+            # Create a loading indicator if it doesn't exist
+            from PyQt6.QtWidgets import QProgressBar
+            self.loading_indicator = QProgressBar(self)
+            self.loading_indicator.setRange(0, 0)  # Indeterminate mode
+            self.loading_indicator.setFixedHeight(2)
+            self.loading_indicator.setTextVisible(False)
+            # Insert at the top of the layout
+            self.layout().insertWidget(0, self.loading_indicator)
+        
+        self.loading_indicator.setVisible(visible)
+        QApplication.processEvents()  # Force UI update
+
     def _handle_dropped_files(self, files: List[str]):
         """Handle dropped video files and folders."""
-        all_valid_files = []
-        all_invalid_files = []  # Only contains video files that failed validation
-        any_video_files_found = False  # Track if we found ANY files with video extensions
+        # Show loading indicator and immediate feedback
+        self._show_loading_indicator(True)
+        self.status_label.setText("Processing files...")
+        QApplication.processEvents()  # Force UI update
         
-        # Process each dropped item
-        for file_path in files:
+        # Start async processing
+        self.worker_thread = run_async(
+            self._handle_dropped_files_async,
+            files,
+            on_success=lambda _: self._on_files_processed(),
+            on_error=lambda e: self._on_files_error(e)
+        )
+    
+    def _on_files_processed(self):
+        """Handle completion of file processing."""
+        self._show_loading_indicator(False)
+        self.status_label.setText("")
+    
+    def _on_files_error(self, error):
+        """Handle error during file processing."""
+        self._show_loading_indicator(False)
+        self.status_label.setText(f"Error: {str(error)}")
+
+    async def _handle_dropped_files_async(self, files):
+        """Process dropped files asynchronously with batched approach."""
+        all_valid_files = []
+        all_invalid_files = []
+        any_video_files_found = False
+        
+        # Process files in smaller chunks to keep UI responsive
+        for i, file_path in enumerate(files):
+            # Allow UI to update every 10 files
+            if i % 10 == 0 and i > 0:
+                await asyncio.sleep(0.01)
+            
             if os.path.isdir(file_path):
                 # If it's a directory, scan it for videos
-                valid_files, invalid_files, has_video_files = self._scan_folder_for_videos(file_path)
+                valid_files, invalid_files, has_video_files_found = await self._scan_folder_for_videos_async(file_path)
                 all_valid_files.extend(valid_files)
                 all_invalid_files.extend(invalid_files)
-                any_video_files_found = any_video_files_found or has_video_files
+                any_video_files_found = any_video_files_found or has_video_files_found
             else:
                 # If it's a file, check if it has a video extension
                 if os.path.isfile(file_path) and self._has_video_extension(file_path):
@@ -389,124 +454,62 @@ class SrtGenerationView(QWidget):
                         all_invalid_files.append(f"{os.path.basename(file_path)}: {message}")
                 # Non-video files are silently ignored
         
-        # First check if any video files were found at all
-        if not any_video_files_found:
-            # No video files found in any of the dropped items
-            QMessageBox.warning(self, "No Videos Found", "No video files were found in the dropped items.")
-            return
+        # Emit signal with results
+        self.files_processed.emit(all_valid_files, all_invalid_files, any_video_files_found)
+        return True
         
-        # Show messages about invalid video files if any exist
-        if all_invalid_files:
-            # Prepare a user-friendly message with the first few errors
-            if len(all_invalid_files) <= 3:
-                error_details = "\n• " + "\n• ".join(all_invalid_files)
-            else:
-                # Show first 3 and a count of remaining
-                error_details = "\n• " + "\n• ".join(all_invalid_files[:3])
-                error_details += f"\n• ...and {len(all_invalid_files) - 3} more invalid file(s)"
-                
-            QMessageBox.warning(
-                self, 
-                "Invalid Files", 
-                f"The following files could not be added:{error_details}"
-            )
-        
-        # Add valid files to the list, avoiding duplicates
-        if all_valid_files:
-            new_files_count = self._add_files_without_duplicates(all_valid_files)
-            self._update_file_list()
-            
-            # Show appropriate message
-            if new_files_count > 0:
-                # Show success message using inlined toast
-                self._show_inline_toast(f"{new_files_count} video files added")
-                
-                # Notify if some files were skipped as duplicates
-                if len(all_valid_files) > new_files_count:
-                    skipped = len(all_valid_files) - new_files_count
-                    QMessageBox.information(self, "Duplicate Files", 
-                                           f"{skipped} file(s) skipped because they were already in the list.")
-            else:
-                QMessageBox.information(self, "Duplicate Files", 
-                                       "All files were already added to the list.")
-
-    def _update_file_list(self):
-        """Update the list widget with current video files."""
-        self.file_list.clear()
-        for file_path in self.video_files:
-            self.file_list.addItem(os.path.basename(file_path))
-
-    def _scan_folder_for_videos(self, folder_path):
-        """Recursively scan a folder for valid video files."""
+    async def _scan_folder_for_videos_async(self, folder_path):
+        """Recursively scan a folder for valid video files asynchronously with batching."""
         valid_files = []
         invalid_files = []
         any_video_files_found = False
         
+        # Process directories in batches
+        batch_size = 50  # Process 50 files at a time
+        current_batch = []
+        
         for root, _, files in os.walk(folder_path):
             for file in files:
                 file_path = os.path.join(root, file)
+                current_batch.append(file_path)
                 
-                # Check if it has a video extension
-                if os.path.isfile(file_path) and self._has_video_extension(file_path):
-                    any_video_files_found = True
+                # Process batch when it reaches the batch size
+                if len(current_batch) >= batch_size:
+                    await self._process_file_batch(current_batch, valid_files, invalid_files)
+                    any_video_files_found = any_video_files_found or bool(valid_files)
+                    current_batch = []
                     
-                    # Only validate files with video extensions
-                    is_valid, message = self._validate_video_file(file_path)
-                    if is_valid:
-                        valid_files.append(file_path)
-                    else:
-                        invalid_files.append(f"{os.path.basename(file_path)}: {message}")
-                # Non-video files are silently ignored
+                    # Allow UI to update between batches
+                    await asyncio.sleep(0.01)
+        
+        # Process any remaining files
+        if current_batch:
+            await self._process_file_batch(current_batch, valid_files, invalid_files)
+            any_video_files_found = any_video_files_found or bool(valid_files)
         
         return valid_files, invalid_files, any_video_files_found
+        
+    async def _process_file_batch(self, batch, valid_files, invalid_files):
+        """Process a batch of files."""
+        for file_path in batch:
+            # Check if it has a video extension
+            if os.path.isfile(file_path) and self._has_video_extension(file_path):
+                # Only validate files with video extensions
+                is_valid, message = self._validate_video_file(file_path)
+                if is_valid:
+                    valid_files.append(file_path)
+                else:
+                    invalid_files.append(f"{os.path.basename(file_path)}: {message}")
+        return valid_files, invalid_files
 
-    def _open_source_folder(self):
-        """Open folder dialog to select video files."""
-        folder_path = QFileDialog.getExistingDirectory(self, "Select Folder with Video Files")
-        if folder_path:
-            # Scan the folder for video files
-            valid_files, invalid_files, any_video_files_found = self._scan_folder_for_videos(folder_path)
-            
-            # First check if any video files were found at all
-            if not any_video_files_found:
-                # No video files found in the selected folder
-                QMessageBox.warning(self, "No Videos Found", "No video files were found in the selected folder.")
-                return
-            
-            # Show messages about invalid video files if any exist
-            if invalid_files:
-                # Prepare a user-friendly message with the first few errors
-                if len(invalid_files) <= 3:
-                    error_details = "\n• " + "\n• ".join(invalid_files)
-                else:
-                    # Show first 3 and a count of remaining
-                    error_details = "\n• " + "\n• ".join(invalid_files[:3])
-                    error_details += f"\n• ...and {len(invalid_files) - 3} more invalid file(s)"
-                    
-                QMessageBox.warning(
-                    self, 
-                    "Invalid Files", 
-                    f"The following files could not be added:{error_details}"
-                )
-            
-            # Add valid files to the list, avoiding duplicates
-            if valid_files:
-                new_files_count = self._add_files_without_duplicates(valid_files)
-                self._update_file_list()
-                
-                # Show appropriate message
-                if new_files_count > 0:
-                    # Show success message using inlined toast
-                    self._show_inline_toast(f"{new_files_count} video files added")
-                    
-                    # Notify if some files were skipped as duplicates
-                    if len(valid_files) > new_files_count:
-                        skipped = len(valid_files) - new_files_count
-                        QMessageBox.information(self, "Duplicate Files", 
-                                               f"{skipped} file(s) skipped because they were already in the list.")
-                else:
-                    QMessageBox.information(self, "Duplicate Files", 
-                                           "All files were already added to the list.")
+    async def _open_source_folder_async(self, folder_path):
+        """Process folder selection asynchronously."""
+        # Scan the folder for video files
+        valid_files, invalid_files, any_video_files_found = await self._scan_folder_for_videos_async(folder_path)
+        
+        # Emit signal with results
+        self.files_processed.emit(valid_files, invalid_files, any_video_files_found)
+        return True
 
     def _remove_selected_file(self):
         """Remove the selected file from the list."""
@@ -631,139 +634,140 @@ class SrtGenerationView(QWidget):
                 print(f"Error removing API keys: {str(e)}")
 
     def _generate_srt(self):
-        """Generate SRT files for the selected videos"""
-        # Reset progress state
-        self.progress_bar.setValue(0)
-        
-        # Get video files
-        video_files = [self.video_files[i] for i in range(self.file_list.count())]
-        
-        if not video_files:
-            QMessageBox.warning(self, "No Files", "No video files have been added. Please add files first.")
+        """Generate SRT files for all videos."""
+        if not self.video_files:
+            QMessageBox.warning(self, "Warning", "No video files to process!")
             return
 
-        # Check if we have a non-empty API key in the input field
-        input_api_key = self.api_key_input.text().strip()
-        if input_api_key:
-            # User has entered a new key, try to save it
-            if not self._save_api_key():
-                return  # Save failed, don't proceed
-        elif not self.api_key:
-            # No API key in input field and no stored key, try to load from manager using rotation
-            if not self._load_api_key_from_manager():
-                QMessageBox.warning(self, "API Key Required", "Please enter a valid AssemblyAI API key")
-                return
-
-        # At this point, self.api_key should be set if we have a valid key
-        if not self.api_key:
-            QMessageBox.warning(self, "API Key Required", "No valid API key available. Please enter a valid AssemblyAI API key")
+        if not self.api_key_manager.is_api_key_set():
+            QMessageBox.warning(self, "Warning", "Please add at least one API key")
             return
-        
-        # Double-check that the API key is set in the AssemblyAI settings
-        aai.settings.api_key = self.api_key
-            
-        # Check for existing worker and stop it if running
+
+        # Clean up any existing worker thread
         if self.worker_thread:
-            print("Stopping existing transcription thread")
-            try:
-                self.worker_thread.stop()
-                self.worker_thread = None
-                # Give a moment for thread cleanup
-                QCoreApplication.processEvents()
-            except Exception as e:
-                print(f"Error stopping worker thread: {str(e)}")
-        
-        # Initialize sequential processing variables
-        self.video_queue = video_files.copy()
-        self.total_videos = len(video_files)
-        self.processed_videos = 0
-        self.successful_videos = 0
-        
-        # Initialize time tracking
-        from src.utils.time_tracker import ProcessTimeTracker
-        self.time_tracker = ProcessTimeTracker(len(video_files))
-        
-        # Create or update time remaining label if it doesn't exist
-        if not hasattr(self, 'time_remaining_label'):
-            self.time_remaining_label = QLabel("Time Remaining: Calculating...", self)
-            self.time_remaining_label.setStyleSheet("color: #666; font-size: 12px;")
-            self.layout().addWidget(self.time_remaining_label)
-        else:
-            self.time_remaining_label.setText("Time Remaining: Calculating...")
-            self.time_remaining_label.setVisible(True)
-        
-        # Start timer to update time remaining display
-        if not hasattr(self, 'time_update_timer'):
-            self.time_update_timer = QTimer(self)
-            self.time_update_timer.timeout.connect(self._update_time_remaining)
-        
-        # Start the timer to update every 5 seconds
-        self.time_update_timer.start(5000)  # 5000 ms = 5 seconds
-        
-        # Update status
-        self.status_label.setText(f"Starting transcription: 0/{self.total_videos} videos processed")
-        QCoreApplication.processEvents()  # Force UI update
-        
-        # Start processing the first video
-        self._process_next_video()
+            self.worker_thread.stop()
+            self.worker_thread = None
 
-    def _process_next_video(self):
-        """Process the next video in the queue"""
-        try:
-            # Check if we have more videos to process
-            if not self.video_queue:
-                # All videos processed, complete the operation
-                self._on_all_videos_finished()
-                return
+        # Reset progress and cancel flag
+        self.progress_bar.setValue(0)
+        self.cancel_requested = False
+        
+        # Initialize the time tracker
+        from ..utils.time_tracker import ProcessTimeTracker
+        self.time_tracker = ProcessTimeTracker(len(self.video_files))
+        self.time_remaining_label.setText("Time Remaining: Calculating...")
+        
+        # Create a timer to update the time remaining display
+        if hasattr(self, 'time_update_timer') and self.time_update_timer:
+            self.time_update_timer.stop()
+        self.time_update_timer = QTimer()
+        self.time_update_timer.timeout.connect(self._update_time_remaining)
+        self.time_update_timer.start(1000)  # Update every second
+        
+        # Start async processing
+        self.worker_thread = run_async(
+            self._generate_srt_async, 
+            self.video_files,
+            on_success=self._on_all_videos_finished,
+            on_error=self._on_transcription_error
+        )
+        
+        # Update UI state
+        self.generate_srt_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+
+    def _on_all_videos_finished(self):
+        """Handle completion of all video processing."""
+        self.status_label.setText("All videos processed successfully!")
+        self.progress_bar.setValue(100)
+        
+        # Reset UI state
+        self.generate_srt_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        
+        # Stop the time update timer
+        if hasattr(self, 'time_update_timer') and self.time_update_timer:
+            self.time_update_timer.stop()
+        
+        # Show success notification
+        self._show_inline_toast("Subtitle generation completed successfully!", 8000)
+        
+        # Clean up resources
+        self.worker_thread = None
+        
+        # NOTE: We're no longer clearing the video files list
+        # This keeps the video files in the list after subtitles are generated
+
+    def _on_transcription_error(self, error):
+        """Handle transcription error."""
+        self.status_label.setText(f"Error: {str(error)}")
+        QMessageBox.critical(self, "Error", str(error))
+        
+        # Reset UI state
+        self.generate_srt_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        
+        # Clean up resources
+        self.worker_thread = None
+
+    def _cancel_operation(self):
+        """Cancel the current operation."""
+        if self.worker_thread:
+            try:
+                self.status_label.setText("Cancelling operation...")
+                QCoreApplication.processEvents()  # Force UI update
                 
-            # Get the next video
-            self.current_video = self.video_queue.pop(0)
-            
-            # Update UI
-            current_status = f"Processing video {self.processed_videos + 1}/{self.total_videos}: {os.path.basename(self.current_video)}"
-            self.status_label.setText(current_status)
-            
-            # Update progress bar to show overall completion
-            overall_progress = int((self.processed_videos / self.total_videos) * 100)
-            self.progress_bar.setValue(overall_progress)
-            QCoreApplication.processEvents()  # Force UI update
-            
-            # Create a wrapper function to run the async method for a single video
-            async def run_single_video():
-                return await self._process_single_video_async(self.current_video)
-            
-            # Start async operation for this video
-            self.worker_thread = run_async(
-                run_single_video,
-                on_success=self._on_single_video_complete,
-                on_error=self._on_single_video_error
-            )
-        except Exception as e:
-            print(f"Error starting video processing: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            
-            # Try to continue with the next video
-            self.processed_videos += 1
-            
-            # Clean up in case of error
-            if hasattr(self, 'current_video'):
-                self.current_video = None
-            
-            if hasattr(self, 'worker_thread') and self.worker_thread:
-                try:
-                    self.worker_thread.stop()
-                except:
-                    pass
+                # Set the cancellation flag
+                self.cancel_requested = True
+                
+                # Stop the worker thread
+                self.worker_thread.stop()
+                
+                # Stop the time update timer
+                if hasattr(self, 'time_update_timer') and self.time_update_timer:
+                    self.time_update_timer.stop()
+                
+                # Reset time tracker
+                if hasattr(self, 'time_tracker'):
+                    self.time_tracker = None
+                self.time_remaining_label.setText("Time Remaining: --")
+                
+                # Process events to keep UI responsive
+                QCoreApplication.processEvents()
+                
+                # Terminate the extraction thread if it exists
+                if self.extraction_thread and hasattr(self.extraction_thread, 'terminate'):
+                    self.status_label.setText("Terminating audio extraction...")
+                    QCoreApplication.processEvents()  # Force UI update
+                    
+                    # Call the terminate method to kill the ffmpeg process
+                    self.extraction_thread.terminate()
+                    
+                    # Reset the extraction thread reference
+                    self.extraction_thread = None
+                
+                # Clean up temp files
+                self._cleanup_temp_files()
+                
+                # Clean up the worker
                 self.worker_thread = None
-            
-            # Try to continue with the next video if there are any left
-            if self.video_queue:
-                # Use a timer to allow some time for cleanup
-                QTimer.singleShot(100, self._process_next_video)
-            else:
-                # End of queue, finish the process
-                self._on_all_videos_finished()
+                
+                # Reset UI state
+                self.status_label.setText("Operation cancelled.")
+                self.cancel_btn.setEnabled(False)
+                self.generate_srt_btn.setEnabled(True)
+                self.progress_bar.setValue(0)  # Reset progress bar
+                self.cancel_requested = False  # Reset cancellation flag
+            except Exception as e:
+                print(f"Error during cancel operation: {str(e)}")
+                # Ensure UI is reset even if an error occurs
+                self.status_label.setText("Operation cancelled with errors.")
+                self.cancel_btn.setEnabled(False)
+                self.generate_srt_btn.setEnabled(True)
+                self.progress_bar.setValue(0)  # Reset progress bar
+                self.worker_thread = None
+                self.extraction_thread = None
+                self.cancel_requested = False
 
     def _on_single_video_complete(self, result):
         """Handle completion of a single video"""
@@ -857,135 +861,75 @@ class SrtGenerationView(QWidget):
             # Schedule next video despite error in error handler
             QTimer.singleShot(100, self._process_next_video)
     
-    def _on_all_videos_finished(self):
-        """Handle completion of all videos"""
-        print("All transcriptions completed")
-        
+    async def _generate_srt_async(self, video_files):
+        """Process multiple video files asynchronously"""
         try:
-            # Set progress bar to 100%
-            self.progress_bar.setValue(100)
-            QCoreApplication.processEvents()  # Force UI update
+            total_files = len(video_files)
+            successful_files = 0
             
-            # Stop the time update timer
-            if hasattr(self, 'time_update_timer') and self.time_update_timer.isActive():
-                self.time_update_timer.stop()
-                
-            # Update the time remaining label to indicate completion
-            if hasattr(self, 'time_remaining_label'):
-                self.time_remaining_label.setText("Time Remaining: Complete")
-            
-            # Clean up any remaining temporary files
-            self._cleanup_temp_files()
-            
-            # Force garbage collection to help with memory
-            import gc
-            gc.collect()
+            # Process one video at a time
+            for i, video_file in enumerate(video_files):
+                result = await self._process_single_video_async(video_file)
+                if result:
+                    successful_files += 1
             
             # Final status message
-            if self.successful_videos > 0:
-                success_msg = f"Successfully transcribed {self.successful_videos}/{self.total_videos} files."
-                self.status_label.setText(success_msg)
-                # Create message box with new style
-                msg_box = QMessageBox(self)  # Create with parent only
-                msg_box.setIcon(QMessageBox.Icon.Information)
-                msg_box.setWindowTitle("Transcription Complete")
-                msg_box.setText(success_msg)
-                msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
-                msg_box.setModal(False)
-                msg_box.show()
+            if successful_files > 0:
+                success_msg = f"Successfully transcribed {successful_files}/{total_files} files."
+                return success_msg
             else:
                 error_msg = "No files were transcribed. Check the API key and try again."
-                self.status_label.setText(error_msg)
-                # Create message box with new style
-                msg_box = QMessageBox(self)  # Create with parent only
-                msg_box.setIcon(QMessageBox.Icon.Warning)
-                msg_box.setWindowTitle("Transcription Failed")
-                msg_box.setText(error_msg)
-                msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
-                msg_box.setModal(False)
-                msg_box.show()
-            
-            # Clean up references
-            self.worker_thread = None
-            self.current_video = None
-            self.video_queue = []
-            
-            # Reset processing state
-            self.processed_videos = 0
-            self.total_videos = 0
-            
-            # Process any pending events before returning
-            QCoreApplication.processEvents()
-            
+                return error_msg
         except Exception as e:
-            print(f"Error in completion phase: {str(e)}")
+            print(f"Error in _generate_srt_async: {str(e)}")
             import traceback
             traceback.print_exc()
-            
-            # Try to at least update the UI
-            try:
-                self.status_label.setText(f"Error during completion: {str(e)}")
-                QCoreApplication.processEvents()
-            except:
-                pass
-    
-    # Keep original handlers for backward compatibility with other parts of the code
-    def _on_transcription_finished(self, result):
-        """Original handler for completed transcription - kept for backward compatibility"""
-        print("Original transcription handler called - no additional actions needed")
-        # Do nothing else to avoid duplicate cleanup
-    
-    def _on_transcription_error(self, error):
-        """Original handler for transcription error - kept for backward compatibility"""
-        print(f"Original transcription error handler called: {str(error)}")
-        # Do nothing else to avoid duplicate cleanup
+            raise e
 
     async def _process_single_video_async(self, video_file):
         """Process a single video file asynchronously"""
         try:
-            # Calculate progress increment for this video (0-100 within its portion of the total)
-            base_progress = int((self.processed_videos / self.total_videos) * 100)
-            video_progress_increment = 100 / self.total_videos
+            # Calculate progress increment for this video
+            total_files = len(self.video_files)
+            current_index = self.video_files.index(video_file)
+            progress_per_file = 100 / total_files
+            base_progress = int((current_index / total_files) * 100)
             
             # Update status
-            current_status = f"Processing video {self.processed_videos + 1}/{self.total_videos}: {os.path.basename(video_file)}"
+            current_status = f"Processing video {current_index + 1}/{total_files}: {os.path.basename(video_file)}"
             
-            # Try to get video duration if available - Note this might return None
+            # Try to get video duration if available
             video_duration = self._get_video_duration(video_file)
             
+            # Track extraction phase start
+            if hasattr(self, 'time_tracker') and self.time_tracker:
+                self.time_tracker.start_phase("extraction", video_file, video_duration)
+            
             # Extract audio from video
-            step_progress = base_progress + (video_progress_increment * 0.05)  # 5% of video progress
+            step_progress = base_progress + (progress_per_file * 0.05)  # 5% of video progress
             self.progress_bar.setValue(int(step_progress))
             self.status_label.setText(f"{current_status} - Extracting audio...")
             QCoreApplication.processEvents()  # Force UI update
             
-            # Start extraction phase tracking
-            if hasattr(self, 'time_tracker') and self.time_tracker:
-                self.time_tracker.start_phase('extraction', video_file, video_duration)
-            
             audio_path = await self._extract_audio(video_file)
-            
-            # End extraction phase tracking
-            if hasattr(self, 'time_tracker') and self.time_tracker:
-                self.time_tracker.end_phase(success=(audio_path is not None))
                 
+            # Track extraction phase end
+            if hasattr(self, 'time_tracker') and self.time_tracker:
+                self.time_tracker.end_phase(audio_path is not None)
+            
             if not audio_path:
                 print(f"Failed to extract audio from {video_file}")
                 return False
             
-            # After audio extraction, we may have a more accurate duration from the audio file
-            # Update video_duration if it wasn't available before
-            if (video_duration is None and 
-                hasattr(self, 'current_audio_duration') and 
-                self.current_audio_duration is not None):
-                video_duration = self.current_audio_duration
-                print(f"Using audio duration for time tracking: {video_duration}")
-            
             # Transcribe audio using assemblyai
-            step_progress = base_progress + (video_progress_increment * 0.25)  # 25% of video progress
+            step_progress = base_progress + (progress_per_file * 0.25)  # 25% of video progress
             self.progress_bar.setValue(int(step_progress))
             self.status_label.setText(f"{current_status} - Transcribing...")
             QCoreApplication.processEvents()  # Force UI update
+            
+            # Track transcription phase start
+            if hasattr(self, 'time_tracker') and self.time_tracker:
+                self.time_tracker.start_phase("transcription", video_file, video_duration)
             
             # Get the next API key in rotation for this transcription job
             self.api_key = self.api_key_manager.get_next_key()
@@ -993,15 +937,16 @@ class SrtGenerationView(QWidget):
                 print("No API keys available.")
                 self.status_label.setText("No API keys available. Please add at least one API key.")
                 QCoreApplication.processEvents()  # Force UI update
+                
+                # Track transcription phase end (failure)
+                if hasattr(self, 'time_tracker') and self.time_tracker:
+                    self.time_tracker.end_phase(False)
+                    
                 return False
                 
             # Set the API key for AssemblyAI
             aai.settings.api_key = self.api_key
             print(f"Using API key for transcription: {self.api_key[:4]}...{self.api_key[-4:]}")
-            
-            # Start transcription phase tracking
-            if hasattr(self, 'time_tracker') and self.time_tracker:
-                self.time_tracker.start_phase('transcription', video_file, video_duration)
             
             # Create transcript with retry support
             max_retries = min(3, len(self.api_key_manager.get_keys()))  # Limit retries based on available keys
@@ -1034,24 +979,24 @@ class SrtGenerationView(QWidget):
                         print(f"Exhausted all retry attempts ({retry_count})")
                         break
             
-            # End transcription phase tracking
+            # Track transcription phase end
             if hasattr(self, 'time_tracker') and self.time_tracker:
-                self.time_tracker.end_phase(success=(transcript is not None))
+                self.time_tracker.end_phase(transcript is not None)
                 
             if not transcript:
                 print(f"Failed to create transcript for {video_file}")
                 return False
             
             # Generate SRT file
-            step_progress = base_progress + (video_progress_increment * 0.80)  # 80% of video progress
+            step_progress = base_progress + (progress_per_file * 0.80)  # 80% of video progress
             self.progress_bar.setValue(int(step_progress))
             self.status_label.setText(f"{current_status} - Formatting subtitles...")
             QCoreApplication.processEvents()  # Force UI update
             
-            # Start SRT generation phase tracking
+            # Track formatting phase start
             if hasattr(self, 'time_tracker') and self.time_tracker:
-                self.time_tracker.start_phase('srt_generation', video_file, video_duration)
-            
+                self.time_tracker.start_phase("formatting", video_file, video_duration)
+                
             srt_path = self._get_srt_path(video_file)
             
             # Use the imported formatter function directly with the full transcript
@@ -1061,33 +1006,17 @@ class SrtGenerationView(QWidget):
             # Save SRT file
             with open(srt_path, 'w', encoding='utf-8') as f:
                 f.write(srt_content)
-            
-            # End SRT generation phase tracking
-            if hasattr(self, 'time_tracker') and self.time_tracker:
-                self.time_tracker.end_phase(success=True)
                 
             print(f"Saved SRT file: {srt_path}")
             
+            # Track formatting phase end
+            if hasattr(self, 'time_tracker') and self.time_tracker:
+                self.time_tracker.end_phase(True)
+            
             # Set progress for this file complete
-            step_progress = base_progress + video_progress_increment
+            step_progress = base_progress + progress_per_file
             self.progress_bar.setValue(int(step_progress))
             QCoreApplication.processEvents()  # Force UI update
-            
-            # Update time tracking for completed video
-            if hasattr(self, 'time_tracker') and self.time_tracker:
-                self.time_tracker.complete_video(video_file)
-                
-                # Update the time remaining display
-                if hasattr(self, 'time_remaining_label'):
-                    remaining_time = self.time_tracker.estimate_remaining_time()
-                    if remaining_time:
-                        minutes, seconds = divmod(int(remaining_time), 60)
-                        hours, minutes = divmod(minutes, 60)
-                        if hours > 0:
-                            time_str = f"{hours}h {minutes}m {seconds}s"
-                        else:
-                            time_str = f"{minutes}m {seconds}s"
-                        self.time_remaining_label.setText(f"Time Remaining: {time_str}")
             
             # Clean up the audio file after processing this video
             try:
@@ -1102,14 +1031,14 @@ class SrtGenerationView(QWidget):
                 
                 # Force processing any pending events
                 QCoreApplication.processEvents()
-                
-                # Optional: help garbage collector
-                import gc
-                gc.collect()
             except Exception as e:
                 print(f"Error during single video cleanup: {str(e)}")
                 # Continue despite cleanup error
             
+            # Mark video as complete in time tracker
+            if hasattr(self, 'time_tracker') and self.time_tracker:
+                self.time_tracker.complete_video(video_file)
+                
             return True
             
         except Exception as e:
@@ -1131,33 +1060,6 @@ class SrtGenerationView(QWidget):
                 pass
                 
             return False
-
-    async def _generate_srt_async(self, video_files):
-        """Legacy method for backward compatibility - now using sequential processing instead"""
-        # This method is kept for backward compatibility
-        # Now the processing is done one video at a time via _process_single_video_async
-        try:
-            total_files = len(video_files)
-            successful_files = 0
-            
-            # Process one video at a time
-            for i, video_file in enumerate(video_files):
-                result = await self._process_single_video_async(video_file)
-                if result:
-                    successful_files += 1
-            
-            # Final status message
-            if successful_files > 0:
-                success_msg = f"Successfully transcribed {successful_files}/{total_files} files."
-                return success_msg
-            else:
-                error_msg = "No files were transcribed. Check the API key and try again."
-                return error_msg
-        except Exception as e:
-            print(f"Error in _generate_srt_async: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            raise e
 
     def closeEvent(self, event):
         """Handle cleanup when the widget is closed"""
@@ -1650,7 +1552,8 @@ class SrtGenerationView(QWidget):
 
     def _cleanup_temp_files(self):
         """Clean up all temporary resources"""
-        if not self.temp_audio_files and not self.worker_thread:
+        if not hasattr(self, 'temp_audio_files'):
+            self.temp_audio_files = []
             return
             
         print("Starting comprehensive resource cleanup...")
@@ -1658,7 +1561,7 @@ class SrtGenerationView(QWidget):
         
         try:
             # First, ensure no worker thread is active
-            if self.worker_thread:
+            if hasattr(self, 'worker_thread') and self.worker_thread:
                 try:
                     print("Stopping worker thread before cleanup")
                     self.worker_thread.stop()
@@ -1669,17 +1572,64 @@ class SrtGenerationView(QWidget):
                 except Exception as e:
                     print(f"Error stopping worker thread: {str(e)}")
             
-            # Clean up temporary audio files
-            for audio_file in self.temp_audio_files[:]:  # Use a copy of the list for safe iteration
+            # Terminate extraction thread if it exists
+            if hasattr(self, 'extraction_thread') and self.extraction_thread:
                 try:
-                    if os.path.exists(audio_file):
-                        print(f"Deleting temporary audio file: {audio_file}")
-                        os.remove(audio_file)
-                        successful_deletions += 1
-                    self.temp_audio_files.remove(audio_file)  # Remove from list regardless of existence
+                    print("Terminating extraction thread before cleanup")
+                    if hasattr(self.extraction_thread, 'terminate'):
+                        self.extraction_thread.terminate()
+                    # Set to None to help garbage collection
+                    self.extraction_thread = None
                 except Exception as e:
-                    print(f"Error deleting temporary audio file {audio_file}: {str(e)}")
-                    # Continue with other files even if this one fails
+                    print(f"Error terminating extraction thread: {str(e)}")
+            
+            # Allow some time for resources to be fully released
+            QCoreApplication.processEvents()
+            time.sleep(0.2)  # Small delay to ensure resources are released
+            
+            # Clean up temporary audio files with retry mechanism
+            for audio_file in list(self.temp_audio_files):  # Use a copy of the list for safe iteration
+                max_retries = 3
+                retry_count = 0
+                
+                while retry_count < max_retries:
+                    try:
+                        if audio_file and os.path.exists(audio_file):
+                            print(f"Attempting to delete temp file: {audio_file} (attempt {retry_count+1})")
+                            
+                            # Force events processing and small delay to ensure file is not in use
+                            QCoreApplication.processEvents()
+                            time.sleep(0.1)  # Short delay
+                            
+                            # Try to delete the file
+                            os.remove(audio_file)
+                            
+                            # Verify deletion was successful
+                            if not os.path.exists(audio_file):
+                                print(f"Successfully deleted: {audio_file}")
+                                successful_deletions += 1
+                                if audio_file in self.temp_audio_files:
+                                    self.temp_audio_files.remove(audio_file)  # Remove from list
+                                break  # Success - exit the retry loop
+                            else:
+                                print(f"File still exists after deletion attempt: {audio_file}")
+                        else:
+                            # File doesn't exist, just remove from tracking list
+                            if audio_file in self.temp_audio_files:
+                                self.temp_audio_files.remove(audio_file)
+                            break
+                            
+                    except Exception as e:
+                        print(f"Error deleting audio file {audio_file} (attempt {retry_count+1}): {str(e)}")
+                    
+                    # Increment retry counter and pause before next attempt
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        time.sleep(0.5)  # Longer delay between retries
+                
+                # Log if file couldn't be deleted after all retries
+                if retry_count == max_retries and audio_file and os.path.exists(audio_file):
+                    print(f"WARNING: Failed to delete {audio_file} after {max_retries} attempts")
             
             # Process any pending events
             QCoreApplication.processEvents()
@@ -1696,8 +1646,10 @@ class SrtGenerationView(QWidget):
         finally:
             # Reset all resource references
             self.temp_audio_files = []
-            self.current_audio_file = None
-            self.current_audio_duration = None
+            if hasattr(self, 'current_audio_file'):
+                self.current_audio_file = None
+            if hasattr(self, 'current_audio_duration'):
+                self.current_audio_duration = None
             # Process any pending events
             QCoreApplication.processEvents()
 
@@ -1736,10 +1688,25 @@ class SrtGenerationView(QWidget):
                 status_callback=status_callback
             )
             
+            # Store the extraction thread for possible cancellation
+            self.extraction_thread = extraction_thread
+            
             # Wait for extraction to complete
             while extraction_thread.is_alive():
                 await asyncio.sleep(0.1)
                 QCoreApplication.processEvents()  # Process UI events while waiting
+                
+                # Check if cancellation was requested
+                if self.cancel_requested:
+                    print("Cancellation requested during audio extraction")
+                    break
+            
+            # Reset the extraction thread reference
+            self.extraction_thread = None
+            
+            # If cancellation was requested or the file doesn't exist, return None
+            if self.cancel_requested or not os.path.exists(output_path):
+                return None
             
             # Get the duration of the audio file
             if os.path.exists(output_path):
@@ -2137,6 +2104,76 @@ class SrtGenerationView(QWidget):
         except Exception as e:
             print(f"Error getting video duration: {str(e)}")
             return None
+
+    def _handle_processed_files(self, valid_files, invalid_files, any_video_files_found):
+        """Handle results from async file processing."""
+        # First check if any video files were found at all
+        if not any_video_files_found:
+            # No video files found in any of the dropped items
+            QMessageBox.warning(self, "No Videos Found", "No video files were found in the dropped items.")
+            return
+        
+        # Show messages about invalid video files if any exist
+        if invalid_files:
+            # Prepare a user-friendly message with the first few errors
+            if len(invalid_files) <= 3:
+                error_details = "\n• " + "\n• ".join(invalid_files)
+            else:
+                # Show first 3 and a count of remaining
+                error_details = "\n• " + "\n• ".join(invalid_files[:3])
+                error_details += f"\n• ...and {len(invalid_files) - 3} more invalid file(s)"
+                
+            QMessageBox.warning(
+                self, 
+                "Invalid Files", 
+                f"The following files could not be added:{error_details}"
+            )
+        
+        # Add valid files to the list, avoiding duplicates
+        if valid_files:
+            new_files_count = self._add_files_without_duplicates(valid_files)
+            self._update_file_list()
+            
+            # Show appropriate message
+            if new_files_count > 0:
+                # Show success message using inlined toast
+                self._show_inline_toast(f"{new_files_count} video files added")
+                
+                # Notify if some files were skipped as duplicates
+                if len(valid_files) > new_files_count:
+                    skipped = len(valid_files) - new_files_count
+                    QMessageBox.information(self, "Duplicate Files", 
+                                          f"{skipped} file(s) skipped because they were already in the list.")
+            else:
+                QMessageBox.information(self, "Duplicate Files", 
+                                      "All files were already added to the list.")
+                                      
+    def _update_status_label(self, text):
+        """Update status label from any thread."""
+        self.status_label.setText(text)
+
+    def _update_file_list(self):
+        """Update the list widget with current video files."""
+        self.file_list.clear()
+        for file_path in self.video_files:
+            self.file_list.addItem(os.path.basename(file_path))
+
+    def _open_source_folder(self):
+        """Open folder dialog to select video files."""
+        folder_path = QFileDialog.getExistingDirectory(self, "Select Folder with Video Files")
+        if folder_path:
+            # Show loading indicator and feedback
+            self._show_loading_indicator(True)
+            self.status_label.setText("Processing folder...")
+            QApplication.processEvents()  # Force UI update
+            
+            # Start async processing
+            self.worker_thread = run_async(
+                self._open_source_folder_async,
+                folder_path,
+                on_success=lambda _: self._on_files_processed(),
+                on_error=lambda e: self._on_files_error(e)
+            )
 
 class SimpleUtterance:
     """Simple class to represent an utterance with text and timing"""

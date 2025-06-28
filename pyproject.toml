@@ -16,15 +16,10 @@ dependencies = [
     "aiohttp",
     "python-dotenv",
     "assemblyai",
-    "PyQt6-WebEngine",
     "pydub",
     "pytube",
     "numpy",
     "scipy",
-    "whisperx",
-    "torch",
-    "transformers",
-    "pyannote.audio",
 ]
 
 [tool.setuptools]

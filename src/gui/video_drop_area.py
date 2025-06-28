@@ -67,6 +67,7 @@ class VideoDropArea(QLabel):
     def dropEvent(self, event: QDropEvent):
         files = []
         for url in event.mimeData().urls():
+            # Just collect the file paths without processing
             file_path = url.toLocalFile()
             files.append(file_path)
         

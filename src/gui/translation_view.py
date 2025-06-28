@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                             QTextEdit, QComboBox, QLabel, QLineEdit, QListWidget,
                             QMessageBox, QProgressBar, QCheckBox, QFileDialog, QApplication, QFrame,
                             QDialog, QDialogButtonBox)
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMetaObject, Q_ARG, QSize
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMetaObject, Q_ARG, QSize, QCoreApplication
 import os
 from typing import List, Dict, Optional, Tuple, Any
 from ..core.translation_service import OpenRouterTranslationService
@@ -13,6 +13,7 @@ from ..core.async_utils import run_async, AsyncWorker
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QStyle
 from ..core.api_provider import ApiProviderFactory
+import asyncio
 
 state = False
 
@@ -118,6 +119,7 @@ class TranslationView(QWidget):
     update_status = pyqtSignal(str)
     back_clicked = pyqtSignal()
     switch_to_srt_generation = pyqtSignal()  # New signal for navigation
+    files_processed = pyqtSignal(list, list)  # Signal for processed files (valid_files, invalid_files)
 
     def __init__(self):
         super().__init__()
@@ -142,6 +144,7 @@ class TranslationView(QWidget):
         # Connect signals to slots
         self.update_progress.connect(self._update_progress_bar)
         self.update_status.connect(self._update_status_label)
+        self.files_processed.connect(self._handle_processed_files)
         
         # Initialize UI
         self._init_ui()
@@ -163,33 +166,32 @@ class TranslationView(QWidget):
 
     def closeEvent(self, event):
         """Handle cleanup when the widget is closed."""
-        self.update_timer.stop()
-        if self.current_worker and self.current_worker.isRunning():
-            try:
-                print("Stopping translation worker during window close")
-                self.current_worker.stop()  # Use stop() instead of quit() and wait()
+        try:
+            # Stop any timers first
+            if hasattr(self, 'update_timer'):
+                self.update_timer.stop()
+                
+            if self.current_worker and self.current_worker.isRunning():
+                print("Stopping translation worker during close")
+                self.current_worker.stop()
                 # Give a moment for thread cleanup
-                from PyQt6.QtCore import QCoreApplication
                 QCoreApplication.processEvents()
-                self.current_worker.deleteLater()
                 self.current_worker = None
-            except Exception as e:
-                print(f"Error stopping worker thread during close: {str(e)}")
+        except Exception as e:
+            print(f"Error stopping worker thread during close: {str(e)}")
         super().closeEvent(event)
 
     def hideEvent(self, event):
         """Handle cleanup when the widget is hidden."""
-        if self.current_worker and self.current_worker.isRunning():
-            try:
+        try:
+            if self.current_worker and self.current_worker.isRunning():
                 print("Stopping translation worker during hide")
-                self.current_worker.stop()  # Use stop() instead of quit() and wait()
+                self.current_worker.stop()
                 # Give a moment for thread cleanup
-                from PyQt6.QtCore import QCoreApplication
                 QCoreApplication.processEvents()
-                self.current_worker.deleteLater()
                 self.current_worker = None
-            except Exception as e:
-                print(f"Error stopping worker thread during hide: {str(e)}")
+        except Exception as e:
+            print(f"Error stopping worker thread during hide: {str(e)}")
         super().hideEvent(event)
 
     def _cleanup_worker(self):
@@ -200,7 +202,6 @@ class TranslationView(QWidget):
                     print("Stopping translation worker during cleanup")
                     self.current_worker.stop()  # Use stop() instead of quit() and wait()
                     # Give a moment for thread cleanup
-                    from PyQt6.QtCore import QCoreApplication
                     QCoreApplication.processEvents()
                 self.current_worker.deleteLater()
                 self.current_worker = None
@@ -353,23 +354,29 @@ class TranslationView(QWidget):
 
         # Output directory button
         self.select_dir_btn = QPushButton("Select Output Directory")
-        self.select_dir_btn.setFixedWidth(self.select_dir_btn.sizeHint().width() + 6)  # Add 6 pixels (3 on each side)
         self.select_dir_btn.clicked.connect(self._select_output_directory)
-        layout.addWidget(self.select_dir_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.select_dir_btn)
+        
+        # Set up the output directory label
+        self._update_output_label()
 
-        # Progress section
-        progress_layout = QVBoxLayout()
-        self.progress_label = QLabel("Translation Progress:")
+        # Progress bar
         self.progress_bar = QProgressBar()
-        progress_layout.addWidget(self.progress_label)
-        progress_layout.addWidget(self.progress_bar)
-        layout.addLayout(progress_layout)
+        layout.addWidget(self.progress_bar)
 
-        # Translate button
-        self.translate_btn = QPushButton("Translate Files")
-        self.translate_btn.setFixedWidth(self.translate_btn.sizeHint().width() + 6)  # Add 6 pixels (3 on each side)
+        # Add Translate and Cancel buttons in a horizontal layout
+        buttons_layout = QHBoxLayout()
+        self.translate_btn = QPushButton("Translate")
         self.translate_btn.clicked.connect(self._translate_files)
-        layout.addWidget(self.translate_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self._cancel_operation)
+        self.cancel_btn.setEnabled(False)  # Initially disabled
+
+        buttons_layout.addStretch()
+        buttons_layout.addWidget(self.translate_btn)
+        buttons_layout.addWidget(self.cancel_btn)
+        buttons_layout.addStretch()
+        layout.addLayout(buttons_layout)
 
         # Status label
         self.status_label = QLabel("")
@@ -442,24 +449,62 @@ class TranslationView(QWidget):
             
         return True, "Valid subtitle file"
 
+    def _show_loading_indicator(self, visible=True):
+        """Show or hide a loading indicator."""
+        if not hasattr(self, 'loading_indicator'):
+            # Create a loading indicator if it doesn't exist
+            from PyQt6.QtWidgets import QProgressBar
+            self.loading_indicator = QProgressBar(self)
+            self.loading_indicator.setRange(0, 0)  # Indeterminate mode
+            self.loading_indicator.setFixedHeight(2)
+            self.loading_indicator.setTextVisible(False)
+            # Insert at the top of the layout
+            self.layout().insertWidget(0, self.loading_indicator)
+        
+        self.loading_indicator.setVisible(visible)
+        QApplication.processEvents()  # Force UI update
+
     def _handle_dropped_files(self, files: List[str]):
         """Handle dropped files or folders."""
-        print("Dropped files/folders:", files)  # Debugging output
+        # Show loading indicator and immediate feedback
+        self._show_loading_indicator(True)
+        self.update_status.emit("Processing files...")
+        QApplication.processEvents()  # Force UI update
+        
+        # Start async processing
+        self.current_worker = run_async(
+            self._handle_dropped_files_async,
+            files,
+            on_success=lambda _: self._on_files_processed(),
+            on_error=lambda e: self._on_files_error(e)
+        )
+    
+    def _on_files_processed(self):
+        """Handle completion of file processing."""
+        self._show_loading_indicator(False)
+        self.update_status.emit("")
+    
+    def _on_files_error(self, error):
+        """Handle error during file processing."""
+        self._show_loading_indicator(False)
+        self.update_status.emit(f"Error: {str(error)}")
+
+    async def _handle_dropped_files_async(self, files):
+        """Handle dropped files or folders asynchronously with batched processing."""
         files_to_add = []
         invalid_files = []
         
-        for file in files:
+        # Process files in smaller chunks to keep UI responsive
+        for i, file in enumerate(files):
+            # Allow UI to update every 10 files
+            if i % 10 == 0 and i > 0:
+                await asyncio.sleep(0.01)
+                
             if os.path.isdir(file):  # Check if the dropped item is a directory
-                # List all supported subtitle files in the directory
-                subtitle_files = []
-                for root, _, filenames in os.walk(file):
-                    for filename in filenames:
-                        if any(filename.lower().endswith(ext) for ext in SUPPORTED_SUBTITLE_FORMATS):
-                            subtitle_files.append(os.path.join(root, filename))
-                        else:
-                            invalid_files.append(filename)
-                print("Found subtitle files:", subtitle_files)  # Debugging output
-                files_to_add.extend(subtitle_files)
+                # Process directory with batched approach
+                dir_files, dir_invalid = await self._scan_directory_async(file)
+                files_to_add.extend(dir_files)
+                invalid_files.extend(dir_invalid)
             else:
                 # Check if the file has a supported extension
                 if any(file.lower().endswith(ext) for ext in SUPPORTED_SUBTITLE_FORMATS):
@@ -467,30 +512,79 @@ class TranslationView(QWidget):
                 else:
                     invalid_files.append(os.path.basename(file))
         
-        # Report unsupported files with error toast
-        if invalid_files:
-            if len(invalid_files) > 3:
-                self._show_inline_toast(f"{len(invalid_files)} unsupported files detected", toast_type='error')
+        # Emit signal with results
+        self.files_processed.emit(files_to_add, invalid_files)
+        return True
+        
+    async def _scan_directory_async(self, directory):
+        """Scan a directory for subtitle files asynchronously with batching."""
+        subtitle_files = []
+        invalid_files = []
+        
+        # Process directories in batches
+        batch_size = 50  # Process 50 files at a time
+        current_batch = []
+        
+        for root, _, filenames in os.walk(directory):
+            for filename in filenames:
+                file_path = os.path.join(root, filename)
+                current_batch.append((file_path, filename))
+                
+                # Process batch when it reaches the batch size
+                if len(current_batch) >= batch_size:
+                    await self._process_file_batch(current_batch, subtitle_files, invalid_files)
+                    current_batch = []
+                    
+                    # Allow UI to update between batches
+                    await asyncio.sleep(0.01)
+        
+        # Process any remaining files
+        if current_batch:
+            await self._process_file_batch(current_batch, subtitle_files, invalid_files)
+        
+        return subtitle_files, invalid_files
+        
+    async def _process_file_batch(self, batch, subtitle_files, invalid_files):
+        """Process a batch of files."""
+        for file_path, filename in batch:
+            if any(filename.lower().endswith(ext) for ext in SUPPORTED_SUBTITLE_FORMATS):
+                subtitle_files.append(file_path)
             else:
-                self._show_inline_toast(f"Unsupported files: {', '.join(invalid_files[:3])}", toast_type='error')
+                invalid_files.append(filename)
+        return subtitle_files, invalid_files
         
-        # Add files without duplicates
-        new_files_count = self._add_files_without_duplicates(files_to_add)
+    def _open_source_folder(self):
+        """Open the source folder and find subtitle files."""
+        folder_path = QFileDialog.getExistingDirectory(self, "Select Source Folder")
+        if folder_path:
+            # Show loading indicator and feedback
+            self._show_loading_indicator(True)
+            self.update_status.emit("Processing folder...")
+            QApplication.processEvents()  # Force UI update
+            
+            # Start async processing
+            self.current_worker = run_async(
+                self._open_source_folder_async,
+                folder_path,
+                on_success=lambda _: self._on_files_processed(),
+                on_error=lambda e: self._on_files_error(e)
+            )
+
+    async def _open_source_folder_async(self, folder_path):
+        """Process folder selection asynchronously."""
+        subtitle_files = []
+        invalid_files = []
         
-        # Update UI
-        self._update_file_list()
+        for root, _, filenames in os.walk(folder_path):
+            for filename in filenames:
+                if any(filename.lower().endswith(ext) for ext in SUPPORTED_SUBTITLE_FORMATS):
+                    subtitle_files.append(os.path.join(root, filename))
+                else:
+                    invalid_files.append(filename)
         
-        # Show success toast if files were added
-        if new_files_count > 0:
-            self._show_inline_toast(f"{new_files_count} subtitle file(s) added")
-        
-        # Show error toast if some files were skipped due to duplicates
-        if len(files_to_add) > new_files_count:
-            skipped = len(files_to_add) - new_files_count
-            # Removed toast notification: "X duplicate file(s) skipped"
-            # Still show the information dialog
-            QMessageBox.information(self, "Duplicate Files", 
-                                   f"{skipped} file(s) skipped because they were already in the list.")
+        # Emit signal with results
+        self.files_processed.emit(subtitle_files, invalid_files)
+        return True
 
     def _update_file_list(self):
         """Update the list of files to be translated."""
@@ -556,6 +650,7 @@ class TranslationView(QWidget):
 
         # Disable UI elements
         self.translate_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
         self.progress_bar.setValue(0)
         
         # Start async translation
@@ -667,6 +762,7 @@ class TranslationView(QWidget):
         """Handle successful translation completion."""
         # Always re-enable UI elements
         self.translate_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
         self._update_key_list()
         self._cleanup_worker()
         
@@ -695,6 +791,7 @@ class TranslationView(QWidget):
         QMessageBox.critical(self, "Error", str(error))
         # Ensure UI is re-enabled
         self.translate_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
         self._update_key_list()
         self._cleanup_worker()
 
@@ -878,41 +975,6 @@ class TranslationView(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             self.files.clear()
             self._update_file_list()
-
-    def _open_source_folder(self):
-        """Open the source folder and find subtitle files."""
-        folder_path = QFileDialog.getExistingDirectory(self, "Select Source Folder")
-        if folder_path:
-            # Analyze the folder for subtitle files
-            subtitle_files = []
-            for root, _, filenames in os.walk(folder_path):
-                for filename in filenames:
-                    if any(filename.lower().endswith(ext) for ext in SUPPORTED_SUBTITLE_FORMATS):
-                        subtitle_files.append(os.path.join(root, filename))
-            
-            if subtitle_files:
-                # Add files without duplicates
-                new_files_count = self._add_files_without_duplicates(subtitle_files)
-                self._update_file_list()
-                
-                # Show success toast if files were added
-                if new_files_count > 0:
-                    self._show_inline_toast(f"{new_files_count} subtitle file(s) added")
-                
-                # Show error toast if some files were skipped due to duplicates
-                if len(subtitle_files) > new_files_count:
-                    skipped = len(subtitle_files) - new_files_count
-                    # Removed toast notification: "X duplicate file(s) skipped"
-                    # Still show the information dialog
-                    QMessageBox.information(self, "Duplicate Files", 
-                                           f"{skipped} file(s) skipped because they were already in the list.")
-                elif new_files_count == 0:
-                    # Removed toast notification: "All files already exist in the list"
-                    QMessageBox.information(self, "Duplicate Files", 
-                                           "All files were already added to the list.")
-            else:
-                # Removed toast notification: "No subtitle files found"
-                QMessageBox.warning(self, "Warning", "No subtitle files found in the selected folder.")
 
     def toggle_dark_mode(self):
         if not self.dark_mode_active:
@@ -1473,4 +1535,59 @@ class TranslationView(QWidget):
     def _update_api_key_list(self):
         """Update the API key list in the UI."""
         self._update_key_list()
+
+    def _cancel_operation(self):
+        """Cancel the current translation operation."""
+        if self.current_worker:
+            try:
+                self.status_label.setText("Cancelling translation...")
+                QCoreApplication.processEvents()  # Force UI update
+                
+                # Stop the worker thread
+                self.current_worker.stop()
+                
+                # Process events to keep UI responsive
+                QCoreApplication.processEvents()
+                
+                # Clean up the worker
+                self.current_worker = None
+                
+                # Reset UI state
+                self.status_label.setText("Translation cancelled.")
+                self.cancel_btn.setEnabled(False)
+                self.translate_btn.setEnabled(True)
+                self.progress_bar.setValue(0)  # Reset progress bar
+            except Exception as e:
+                print(f"Error during cancel operation: {str(e)}")
+                # Ensure UI is reset even if an error occurs
+                self.status_label.setText("Translation cancelled with errors.")
+                self.cancel_btn.setEnabled(False)
+                self.translate_btn.setEnabled(True)
+                self.progress_bar.setValue(0)  # Reset progress bar
+                self.current_worker = None
+
+    def _handle_processed_files(self, files_to_add, invalid_files):
+        """Handle results from async file processing."""
+        # Report unsupported files with error toast
+        if invalid_files:
+            if len(invalid_files) > 3:
+                self._show_inline_toast(f"{len(invalid_files)} unsupported files detected", toast_type='error')
+            else:
+                self._show_inline_toast(f"Unsupported files: {', '.join(invalid_files[:3])}", toast_type='error')
+        
+        # Add files without duplicates
+        new_files_count = self._add_files_without_duplicates(files_to_add)
+        
+        # Update UI
+        self._update_file_list()
+        
+        # Show success toast if files were added
+        if new_files_count > 0:
+            self._show_inline_toast(f"{new_files_count} subtitle file(s) added")
+        
+        # Show error toast if some files were skipped due to duplicates
+        if len(files_to_add) > new_files_count:
+            skipped = len(files_to_add) - new_files_count
+            QMessageBox.information(self, "Duplicate Files", 
+                                   f"{skipped} file(s) skipped because they were already in the list.")
 

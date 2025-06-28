@@ -1,14 +1,14 @@
 **Create venv:**
-`uv venv .venv311 --python 3.11`
+`uv venv`
 
 **Activate venv (Windows):**
-`.venv311\Scripts\activate`
+`.venv\Scripts\activate`
 
 **Activate venv (Unix):**
-`source .venv311\Scripts\activate`
+`source .venv\Scripts\activate`
 
 **Install dependencies:**
-`uv pip install -e .`
+`uv pip install -r requirements.txt .`
 
 **Excute program:**
 `python main.py`

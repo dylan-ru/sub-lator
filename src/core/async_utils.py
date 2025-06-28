@@ -1,9 +1,10 @@
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QThread, pyqtSignal, QCoreApplication
 import asyncio
 from typing import Callable, Any, Optional
 from functools import partial
 import concurrent.futures
 import traceback
+import time
 
 class AsyncWorker(QThread):
     """Worker thread for running async operations."""
@@ -76,8 +77,15 @@ class AsyncWorker(QThread):
         if self.task and not self.task.done() and self.loop:
             self.loop.call_soon_threadsafe(self.task.cancel)
             
-        # Wait for the thread to finish with a timeout
-        self.wait(5000)  # 5 second timeout
+        # Use a shorter timeout and process events during wait
+        # to prevent UI freezing
+        start_time = time.time()
+        max_wait_time = 2.0  # 2 seconds max wait
+        
+        while self.isRunning() and (time.time() - start_time) < max_wait_time:
+            QCoreApplication.processEvents()  # Keep UI responsive
+            time.sleep(0.1)  # Short sleep to prevent CPU hogging
+        
         print("AsyncWorker thread stopped")
 
 def run_async(coro: Callable, *args, on_success=None, on_error=None, **kwargs) -> AsyncWorker:
