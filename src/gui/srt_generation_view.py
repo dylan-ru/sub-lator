@@ -405,7 +405,7 @@ class SrtGenerationView(QWidget):
         self.status_label.setText("Processing files...")
         QApplication.processEvents()  # Force UI update
         
-        # Start async processing
+        # Start async processing immediately without any pre-processing
         self.worker_thread = run_async(
             self._handle_dropped_files_async,
             files,
@@ -647,6 +647,9 @@ class SrtGenerationView(QWidget):
         if self.worker_thread:
             self.worker_thread.stop()
             self.worker_thread = None
+            
+        # Clean up any temporary files from previous runs
+        self._cleanup_temp_files()
 
         # Reset progress and cancel flag
         self.progress_bar.setValue(0)
@@ -715,6 +718,8 @@ class SrtGenerationView(QWidget):
         if self.worker_thread:
             try:
                 self.status_label.setText("Cancelling operation...")
+                # Set the progress bar to 0% immediately for visual feedback
+                self.progress_bar.setValue(0)
                 QCoreApplication.processEvents()  # Force UI update
                 
                 # Set the cancellation flag
@@ -756,7 +761,6 @@ class SrtGenerationView(QWidget):
                 self.status_label.setText("Operation cancelled.")
                 self.cancel_btn.setEnabled(False)
                 self.generate_srt_btn.setEnabled(True)
-                self.progress_bar.setValue(0)  # Reset progress bar
                 self.cancel_requested = False  # Reset cancellation flag
             except Exception as e:
                 print(f"Error during cancel operation: {str(e)}")
@@ -1554,7 +1558,6 @@ class SrtGenerationView(QWidget):
         """Clean up all temporary resources"""
         if not hasattr(self, 'temp_audio_files'):
             self.temp_audio_files = []
-            return
             
         print("Starting comprehensive resource cleanup...")
         successful_deletions = 0
@@ -1630,6 +1633,25 @@ class SrtGenerationView(QWidget):
                 # Log if file couldn't be deleted after all retries
                 if retry_count == max_retries and audio_file and os.path.exists(audio_file):
                     print(f"WARNING: Failed to delete {audio_file} after {max_retries} attempts")
+            
+            # Clean up all .wav files in the temp directory, including those from previous sessions
+            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "temp")
+            if os.path.exists(temp_dir):
+                print(f"Scanning temp directory for old .wav files: {temp_dir}")
+                current_time = time.time()
+                # Find all .wav files in the temp directory
+                for filename in os.listdir(temp_dir):
+                    if filename.endswith('.wav'):
+                        file_path = os.path.join(temp_dir, filename)
+                        try:
+                            # Check if the file is older than 1 hour or if we're doing a full cleanup
+                            file_age = current_time - os.path.getmtime(file_path)
+                            if file_age > 60:  # 1 minute in seconds
+                                print(f"Removing old temp file: {filename} (age: {file_age/3600:.1f} hours)")
+                                os.remove(file_path)
+                                successful_deletions += 1
+                        except Exception as e:
+                            print(f"Error removing temp file {filename}: {str(e)}")
             
             # Process any pending events
             QCoreApplication.processEvents()

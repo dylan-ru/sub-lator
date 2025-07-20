@@ -62,39 +62,46 @@ def extract_audio(video_path, audio_path, progress_callback=None, status_callbac
         universal_newlines=True
     )
     
-    # Function to read output and update progress
-    def read_output():
-        if total_duration > 0 and progress_callback:
-            for line in process.stdout:
-                time_match = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
-                if time_match:
-                    hours, minutes, seconds = map(float, time_match.groups())
-                    current_time = hours * 3600 + minutes * 60 + seconds
-                    progress = min(int((current_time / total_duration) * 100), 100)
-                    progress_callback(progress)
-                    
-                    if status_callback:
-                        status_callback(f"Extracting audio... {progress}%")
-        
-        # Wait for process to complete
-        return_code = process.wait()
-        if return_code != 0:
-            if status_callback:
-                status_callback(f"Error extracting audio. Return code: {return_code}")
-            raise RuntimeError(f"ffmpeg error: Return code {return_code}")
-        else:
-            if progress_callback:
-                progress_callback(100)
-            if status_callback:
-                status_callback("Audio extraction complete")
-    
     # Create a custom thread with terminate method
     class ExtractionThread(threading.Thread):
-        def __init__(self, target):
-            super().__init__(target=target)
+        def __init__(self):
+            super().__init__()
             self.daemon = True
             self.process = process
             self.cancelled = False
+            
+        def run(self):
+            """Read output and update progress"""
+            if total_duration > 0 and progress_callback:
+                for line in process.stdout:
+                    time_match = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
+                    if time_match:
+                        hours, minutes, seconds = map(float, time_match.groups())
+                        current_time = hours * 3600 + minutes * 60 + seconds
+                        progress = min(int((current_time / total_duration) * 100), 100)
+                        progress_callback(progress)
+                        
+                        if status_callback:
+                            status_callback(f"Extracting audio... {progress}%")
+            
+            # Wait for process to complete
+            return_code = process.wait()
+            
+            # Only raise an error if the process wasn't intentionally cancelled
+            if return_code != 0 and not self.cancelled:
+                if status_callback:
+                    status_callback(f"Error extracting audio. Return code: {return_code}")
+                raise RuntimeError(f"ffmpeg error: Return code {return_code}")
+            else:
+                if self.cancelled:
+                    if status_callback:
+                        status_callback("Audio extraction cancelled")
+                    print("Audio extraction was cancelled intentionally")
+                else:
+                    if progress_callback:
+                        progress_callback(100)
+                    if status_callback:
+                        status_callback("Audio extraction complete")
             
         def terminate(self):
             """Terminate the ffmpeg process"""
@@ -121,8 +128,8 @@ def extract_audio(video_path, audio_path, progress_callback=None, status_callbac
                     return False
             return False
     
-    # Start reading output in a custom thread
-    thread = ExtractionThread(target=read_output)
+    # Create and start the extraction thread
+    thread = ExtractionThread()
     thread.start()
     
     return thread  # Return the thread so caller can terminate it if needed 
